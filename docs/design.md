@@ -2,7 +2,7 @@
 
 ## 版本与来源
 
-- CPR 目标宿主：v3.35.0（源码 tag 对应提交 `e633557c50456d200c14f8c84e3a6cbd8cbf6cda`）
+- 生产宿主 `vm-us` 于 2026-11-04 实测 CPR `v3.38.2`（RPC v7）；插件 SDK 固定取自 `v3.35.0` 对应的提交 `e633557c50456d200c14f8c84e3a6cbd8cbf6cda`，使用相同的 `upstream_adapter v5` 合同。此兼容性推断不替代实际 CPR 安装/运行验收。
 - manifest v2、RPC v7、upstream_adapter v5、model_catalog v2
 - Google Vertex 使用 `:generateContent`，第一期仅 Gemini 文本 JSON 响应
 - ADC 采用 Google 官方 Rust `google-cloud-auth` crate，支持 `external_account` WIF；凭据由运行身份的环境提供，不从 CPR Key 读取
