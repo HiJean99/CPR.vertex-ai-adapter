@@ -5,7 +5,7 @@
 - CPR 目标宿主：v3.35.0（源码 tag 对应提交 `e633557c50456d200c14f8c84e3a6cbd8cbf6cda`）
 - manifest v2、RPC v7、upstream_adapter v5、model_catalog v2
 - Google Vertex 使用 `:generateContent`，第一期仅 Gemini 文本 JSON 响应
-- ADC 采用 MIT 许可的 `gcp_auth` crate，凭据由运行身份的环境提供
+- ADC 采用 Google 官方 Rust `google-cloud-auth` crate，支持 `external_account` WIF；凭据由运行身份的环境提供，不从 CPR Key 读取
 - 第三方 CLIProxyAPI Vertex ADC 插件仅作为研究参考，未拷贝任何代码（该参考仓库未附授权许可证）
 
 ## 安全与隔离

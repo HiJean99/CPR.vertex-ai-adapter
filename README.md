@@ -1,11 +1,11 @@
-# CPR Vertex AI Adapter
+# CPR Vertex AI Adapter (v0.1.1)
 
 独立 Rust 插件，通过 CPR 官方 `upstream_adapter v5` + `model_catalog v2` 挂载 Vertex AI Gemini，不修改 CPR 核心。
 
 ## 当前范围
 
 - 第一期：Vertex AI `publishers/google` Gemini **文本、非流式** `POST :generateContent`，OpenAI Responses 协议输入输出
-- 使用环境 ADC（支持 `gcloud auth application-default login` 和工作负载身份），不导入真实 Google 凭据到 CPR
+- 采用 Google 官方 Rust `google-cloud-auth` ADC：支持 Service Account、`gcloud auth application-default login` 及 Workload Identity Federation（WIF）配置，不导入真实 Google 凭据到 CPR
 - Token 通过 `Authorization: Bearer` 只发送到受控的 Google Vertex AI HTTPS 上游，使用 `x-goog-user-project` 归集配额
 - SDK 负责绑定、Key 作用域、账号选择、代理、发送状态、错误观测与结算，插件不直接访问 CPR 数据库
 - 目前不支持工具调用、图片、音频、原生续接、WebSocket、流式 SSE、Claude、模型自动发现或 Google 余额查询
@@ -21,6 +21,10 @@
 6. 首次安装仅测试 `/v1/responses` 的 `stream:false` 文本请求；不能拿 Codex CLI 作为当前版本的验收依据
 
 > 插件 SDK 的 `model_catalog v2` 要求注册时就有静态账号 ID，因此此版不能在启用后异步创建账号而直接发布完整模型目录。先使用显式 `accountId`；以后再设计安全的一次性 bootstrap 与重新发布流程。
+
+## ADC 部署前提
+
+在外部 VPS 上优先使用已配置身份提供方的 Workload Identity Federation，具体 `GOOGLE_APPLICATION_CREDENTIALS` 指向由管理员安全保管的 external-account 配置文件；该文件本身不包含服务账号私钥。WIF 仍需要可用的外部身份源，**不能仅靠插件自动获得 Google Cloud 身份**。不支持 WIF 时应暂停生产启用，不应擅自降级到长期 Service Account 私钥。
 
 ## 配置示例（无凭据）
 
