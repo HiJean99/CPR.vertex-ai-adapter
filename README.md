@@ -1,4 +1,4 @@
-# CPR Vertex AI Adapter v0.2.8
+# CPR Vertex AI Adapter v0.2.9
 
 A CPR 3.38.2+ plugin that connects one Google account through the official Google Cloud CLI (gcloud) ADC flow and routes Gemini 4 Argon text requests to Google Vertex AI.
 
@@ -9,7 +9,7 @@ A CPR 3.38.2+ plugin that connects one Google account through the official Googl
 - One Google account and one selected project per plugin instance.
 - ADC and gcloud config live under the persistent CPR data directory, separate from the Codex accounts and keys.
 - Creates one managed OpenAI API-key placeholder account during adapter registration (required by CPR static model-catalog validation), then creates the dedicated `Vertex AI` account group from the management page and adds the account after project verification.
-- Gemini 4 Argon text Responses API, both non-streaming JSON and streaming SSE
+- Gemini 4 Argon text Responses API; all Vertex inference uses `streamGenerateContent?alt=sse`, with downstream `stream:false` assembled into one completed JSON response
 - OpenAI `reasoning.effort` maps to Gemini 4 `thinkingLevel` (`low`, `medium`, `high`)
 - Uses CPR managed upstream HTTP, account scheduling, usage metering, and the selected account's outbound proxy.
 
@@ -55,13 +55,13 @@ The adapter binding must not use an account-group or Client-Key scope: CPR's sta
 
 ## Model catalog and supported request scope
 
-The CPR model catalog is static at plugin registration. v0.2.8 exposes exactly one model and declares native reasoning support with `low`, `medium` and `high` effort levels (default `medium`):
+The CPR model catalog is static at plugin registration. v0.2.9 exposes exactly one model and declares native reasoning support with `low`, `medium` and `high` effort levels (default `medium`):
 
 - `vertex/google/gemini-4-argon` (GA)
 
-CPR account-level OpenAI model discovery (`GET /v1/models`) is a separate path and is not supported by Vertex AI; a failure there must not be used as an inference health check. The adapter contributes its own static model catalog and sends inference to the project/location-specific `generateContent` and `streamGenerateContent` endpoints.
+CPR account-level OpenAI model discovery (`GET /v1/models`) is a separate path and is not supported by Vertex AI; a failure there must not be used as an inference health check. The adapter contributes its own static model catalog and sends all inference to the project/location-specific `streamGenerateContent?alt=sse` endpoint, regardless of the downstream stream mode.
 
-Supported request protocol: OpenAI Responses text input/output. Both `stream:false` and `stream:true` are supported. Non-streaming output is represented as a typed `response.completed` wire event containing the complete response object, so CPR can collect the terminal response for JSON delivery. OpenAI `reasoning.effort` values `low`, `medium` and `high` map to Gemini 4 `thinkingConfig.thinkingLevel`; the model defaults to `MEDIUM`. `temperature`, `top_p` and `top_k` are ignored by Gemini 4 and are not forwarded. The adapter rejects `minimal`, `none`, `xhigh`, tools, images, audio and native `previous_response_id` continuation. `reasoning.summary` accepts the OpenAI values `auto`, `concise` and `detailed` but is ignored because this adapter does not emit a separate reasoning summary.
+Supported request protocol: OpenAI Responses text input/output. Both `stream:false` and `stream:true` are supported. Both modes use Vertex SSE upstream: `stream:false` consumes the full stream and emits one typed `response.completed` `WirePayload::Json` event for JSON delivery, while `stream:true` forwards OpenAI Responses SSE events as text arrives. For explicit `reasoning.effort`, the adapter sets `thinkingConfig.includeThoughts=true`; thought-only frames are accepted as upstream keepalives but their content is never delivered downstream. The model defaults to `MEDIUM`. `temperature`, `top_p` and `top_k` are ignored by Gemini 4 and are not forwarded. The adapter rejects `minimal`, `none`, `xhigh`, tools, images, audio and native `previous_response_id` continuation. `reasoning.summary` accepts the OpenAI values `auto`, `concise` and `detailed` but is ignored because this adapter does not emit a separate reasoning summary.
 
 Gemini 4 uses a unified 1,048,576-token input/output budget. This adapter caps a single non-streaming direct HTTP request at 32,768 output tokens and a streaming request at 65,536 output tokens. Long-decode continuation up to 1,048,576 tokens is not implemented; it requires the `v1beta1` continuation-token flow. The model itself supports additional modalities, but this adapter exposes text-only Responses. Model availability still depends on the selected project's Vertex AI permissions, location and model access.
 

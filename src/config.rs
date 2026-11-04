@@ -106,7 +106,6 @@ impl Config {
         project_id: &str,
         location: &str,
         model: &str,
-        streaming: bool,
     ) -> Result<String, PluginFault> {
         if !valid_project_id(project_id)
             || !valid_location(location)
@@ -117,13 +116,8 @@ impl Config {
                 "Invalid Vertex project, location, or model.",
             ));
         }
-        let action = if streaming {
-            "streamGenerateContent"
-        } else {
-            "generateContent"
-        };
         Ok(format!(
-            "projects/{project_id}/locations/{location}/publishers/google/models/{model}:{action}"
+            "projects/{project_id}/locations/{location}/publishers/google/models/{model}:streamGenerateContent"
         ))
     }
 
@@ -212,23 +206,15 @@ mod tests {
     #[test]
     fn project_path_is_validated_and_uses_the_gemini_4_vertex_path() {
         assert_eq!(
-            Config::project_path("example-project-123", "global", GEMINI_MODEL_ID, false).unwrap(),
-            "projects/example-project-123/locations/global/publishers/google/models/gemini-4-argon:generateContent"
+            Config::project_path("example-project-123", "global", GEMINI_MODEL_ID).unwrap(),
+            "projects/example-project-123/locations/global/publishers/google/models/gemini-4-argon:streamGenerateContent"
         );
-        assert!(Config::project_path("../evil-project", "global", GEMINI_MODEL_ID, false).is_err());
+        assert!(Config::project_path("../evil-project", "global", GEMINI_MODEL_ID).is_err());
         assert!(
-            Config::project_path(
-                "example-project-123",
-                "global.example.com",
-                GEMINI_MODEL_ID,
-                false
-            )
-            .is_err()
-        );
-        assert!(
-            Config::project_path("example-project-123", "global", "gemini-3.8-flash", false)
+            Config::project_path("example-project-123", "global.example.com", GEMINI_MODEL_ID)
                 .is_err()
         );
+        assert!(Config::project_path("example-project-123", "global", "gemini-3.8-flash").is_err());
     }
 
     #[test]

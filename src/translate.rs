@@ -85,7 +85,7 @@ fn text_content(value: &Value) -> Result<String, PluginFault> {
     }
 }
 
-/// Returns the Vertex request body and whether the client requested SSE.
+/// Returns the Vertex request body and whether the downstream client requested SSE output.
 pub fn request_to_vertex(input: &[u8]) -> Result<(Vec<u8>, bool), PluginFault> {
     let root: Value = serde_json::from_slice(input)
         .map_err(|_| invalid("OpenAI Responses request must be JSON."))?;
@@ -221,7 +221,10 @@ pub fn request_to_vertex(input: &[u8]) -> Result<(Vec<u8>, bool), PluginFault> {
         options.insert("maxOutputTokens".to_owned(), Value::from(tokens));
     }
     if let Some(level) = thinking_level(object)? {
-        options.insert("thinkingConfig".to_owned(), json!({"thinkingLevel":level}));
+        options.insert(
+            "thinkingConfig".to_owned(),
+            json!({"thinkingLevel":level,"includeThoughts":true}),
+        );
     }
     // Gemini 4 ignores temperature, top_p and top_k; do not forward misleading controls.
     if !options.is_empty() {
@@ -232,32 +235,14 @@ pub fn request_to_vertex(input: &[u8]) -> Result<(Vec<u8>, bool), PluginFault> {
     Ok((body, streaming))
 }
 
-pub fn response_to_event(
-    raw: &[u8],
-    public_model: &str,
-) -> Result<UpstreamAdapterEvent, PluginFault> {
-    let root: Value =
-        serde_json::from_slice(raw).map_err(|_| invalid("Vertex AI returned invalid JSON."))?;
-    let candidate = root
-        .pointer("/candidates/0")
-        .ok_or_else(|| invalid("Vertex AI returned no candidate."))?;
-    let parts = candidate
-        .pointer("/content/parts")
-        .and_then(Value::as_array)
-        .ok_or_else(|| invalid("Vertex AI response content is unavailable."))?;
-    let text = parts
-        .iter()
-        .filter(|part| part.get("thought") != Some(&Value::Bool(true)))
-        .filter_map(|part| part.get("text").and_then(Value::as_str))
-        .collect::<Vec<_>>()
-        .join("");
-    if text.is_empty() {
-        return Err(invalid("Vertex AI returned no text output."));
-    }
-    let ids = StreamIds::new(public_model);
-    let usage = usage_from_vertex(&root);
-    let reason = finish_reason(candidate.get("finishReason").and_then(Value::as_str));
-    let response = completed_response(&ids, &text, &usage);
+/// Build the single terminal JSON event after collecting Vertex SSE for a downstream stream:false call.
+pub fn completed_response_event(
+    ids: &StreamIds,
+    text: &str,
+    usage: Usage,
+    reason: FinishReason,
+) -> UpstreamAdapterEvent {
+    let response = completed_response(ids, text, &usage);
     let wire = WireEvent {
         protocol: "openai".to_owned(),
         payload: WirePayload::Json {
@@ -272,27 +257,30 @@ pub fn response_to_event(
             raw_sse: None,
         },
     };
-    Ok(UpstreamAdapterEvent::new(ExecutionEvent {
+    UpstreamAdapterEvent::new(ExecutionEvent {
         facts: vec![
             CanonicalEvent::Started {
                 id: ids.response_id.clone(),
-                model: Some(public_model.to_owned()),
+                model: Some(ids.model.clone()),
             },
             CanonicalEvent::ContentAdded {
                 index: 0,
                 kind: ContentKind::Text,
             },
-            CanonicalEvent::TextDelta { index: 0, text },
+            CanonicalEvent::TextDelta {
+                index: 0,
+                text: text.to_owned(),
+            },
             CanonicalEvent::Usage { usage },
             CanonicalEvent::Completed {
-                id: ids.response_id,
-                model: Some(public_model.to_owned()),
+                id: ids.response_id.clone(),
+                model: Some(ids.model.clone()),
                 reason,
             },
         ],
         wire: Some(wire),
         host: None,
-    }))
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -329,9 +317,15 @@ pub fn stream_delta(raw_json: &[u8]) -> Result<StreamDelta, PluginFault> {
     let root: Value = serde_json::from_slice(raw_json)
         .map_err(|_| invalid("Vertex AI SSE data was invalid JSON."))?;
     let candidate = root.pointer("/candidates/0");
-    let text = candidate
+    let parts = candidate
         .and_then(|c| c.pointer("/content/parts"))
-        .and_then(Value::as_array)
+        .and_then(Value::as_array);
+    let has_thought = parts.is_some_and(|parts| {
+        parts
+            .iter()
+            .any(|part| part.get("thought") == Some(&Value::Bool(true)))
+    });
+    let text = parts
         .map(|parts| {
             parts
                 .iter()
@@ -349,6 +343,14 @@ pub fn stream_delta(raw_json: &[u8]) -> Result<StreamDelta, PluginFault> {
     if text.is_empty() && usage.is_none() && finish_reason.is_none() {
         if root.get("promptFeedback").is_some() {
             return Err(invalid("Vertex AI blocked this prompt."));
+        }
+        if has_thought {
+            // Thought-only frames are upstream keepalives; their content is never sent downstream.
+            return Ok(StreamDelta {
+                text,
+                usage,
+                finish_reason,
+            });
         }
         return Err(invalid("Vertex AI SSE event contained no text or usage."));
     }
@@ -547,6 +549,12 @@ mod tests {
                 .unwrap(),
             "HIGH"
         );
+        assert_eq!(
+            result
+                .pointer("/generationConfig/thinkingConfig/includeThoughts")
+                .unwrap(),
+            true
+        );
         assert!(result.pointer("/generationConfig/temperature").is_none());
         assert!(result.pointer("/generationConfig/topP").is_none());
         assert!(result.pointer("/generationConfig/topK").is_none());
@@ -579,6 +587,12 @@ mod tests {
                     .pointer("/generationConfig/thinkingConfig/thinkingLevel")
                     .unwrap(),
                 expected
+            );
+            assert_eq!(
+                result
+                    .pointer("/generationConfig/thinkingConfig/includeThoughts")
+                    .unwrap(),
+                true
             );
         }
         assert!(
@@ -627,10 +641,11 @@ mod tests {
     }
 
     #[test]
-    fn converts_non_stream_response_to_completed_wire_and_preserves_usage() {
-        let raw = json!({"candidates":[{"content":{"role":"model","parts":[{"text":"Hello"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2,"thoughtsTokenCount":7,"totalTokenCount":19}});
-        let event =
-            response_to_event(raw.to_string().as_bytes(), "vertex/google/gemini-4-argon").unwrap();
+    fn converts_collected_sse_to_completed_wire_and_preserves_usage() {
+        let raw = json!({"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2,"thoughtsTokenCount":7,"totalTokenCount":19}});
+        let usage = usage_from_vertex(&raw);
+        let ids = StreamIds::new("vertex/google/gemini-4-argon");
+        let event = completed_response_event(&ids, "Hello", usage, FinishReason::Stop);
         let decoded = UpstreamAdapterEvent::decode(&event.encode().unwrap()).unwrap();
 
         assert_eq!(decoded.event.facts.len(), 5);
@@ -670,6 +685,23 @@ mod tests {
             7
         );
         assert_eq!(data["response"]["usage"]["total_tokens"], 19);
+    }
+
+    #[test]
+    fn thought_only_sse_frames_are_keepalives_and_thought_text_is_never_exposed() {
+        let heartbeat = stream_delta(
+            br#"{"candidates":[{"content":{"parts":[{"text":"private thought","thought":true}]}}]}"#,
+        )
+        .unwrap();
+        assert!(heartbeat.text.is_empty());
+        assert!(heartbeat.usage.is_none());
+        assert!(heartbeat.finish_reason.is_none());
+
+        let mixed = stream_delta(
+            br#"{"candidates":[{"content":{"parts":[{"text":"private thought","thought":true},{"text":"visible answer"}]}}]}"#,
+        )
+        .unwrap();
+        assert_eq!(mixed.text, "visible answer");
     }
 
     #[test]

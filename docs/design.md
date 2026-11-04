@@ -1,8 +1,8 @@
-# v0.2.8 design notes
+# v0.2.9 design notes
 
 ## Scope
 
-One Google user account, one Cloud Project, gcloud ADC, Gemini 4 Argon text Responses API (JSON + SSE). No custom OAuth application, no WIF, no Service Account key import, no multiple Google accounts, no browser automation and no credits scraping.
+One Google user account, one Cloud Project, gcloud ADC, Gemini 4 Argon text Responses API. All Vertex inference uses `streamGenerateContent?alt=sse`; the adapter maps that stream to downstream JSON or SSE. No custom OAuth application, no WIF, no Service Account key import, no multiple Google accounts, no browser automation and no credits scraping.
 
 ## Control plane
 
@@ -22,7 +22,7 @@ One Google user account, one Cloud Project, gcloud ADC, Gemini 4 Argon text Resp
 - Adapter registration idempotently creates or locates one managed OpenAI API-key placeholder account using the plugin-owned account marker. Its returned CPR account ID is included in `UpstreamAdapterDeclaration.account_ids`, as required by CPR 3.38.2 for contributed model catalogs.
 - The management page idempotently creates a CPR account group with resource key `vertex-ai`; after project verification, it adds the managed account to that group.
 - Adapter declaration uses the OpenAI built-in provider, `api_key` authentication kind, base URL `https://aiplatform.googleapis.com/v1/`, `http_sse` transport, empty adapter model list and exactly one managed account ID. The upstream binding uses Provider `openai`, the single exact public model ID `vertex/google/gemini-4-argon`, no account-group or Client-Key scope, and failure policy `reject`. CPR requires the static account ID to associate contributed models with the adapter; request access is instead restricted by the native Vertex AI account group assigned to each Client Key.
-- The model catalog is contributed statically at registration and declares native `Reasoning` support with `low`, `medium` and `high` effort levels (default `medium`). This capability declaration is required for CPR to route requests containing `reasoning.effort`. CPR account-level OpenAI model discovery (`GET /v1/models`) is not a Vertex AI inference API and may fail independently; Gemini inference uses the project/location-specific `generateContent` and `streamGenerateContent` endpoints.
+- The model catalog is contributed statically at registration and declares native `Reasoning` support with `low`, `medium` and `high` effort levels (default `medium`). This capability declaration is required for CPR to route requests containing `reasoning.effort`. CPR account-level OpenAI model discovery (`GET /v1/models`) is not a Vertex AI inference API and may fail independently; all Gemini inference uses the project/location-specific `streamGenerateContent?alt=sse` endpoint.
 - The placeholder account is created before the static adapter declaration and its ID is returned in `account_ids`. After Google project verification, the plugin replaces its metadata and adds it to the group. The provider credential contains only a dummy key and generic Vertex base URL; the Google ADC remains in the gcloud config directory.
 - The plugin does not create Client Keys. CPR's `ensure_key` resource API does not return a one-time displayable secret, so a user-facing key is created in the native CPR admin UI.
 
@@ -32,8 +32,10 @@ One Google user account, one Cloud Project, gcloud ADC, Gemini 4 Argon text Resp
 - Obtain a current ADC access token via gcloud; gcloud handles refresh.
 - Use `HostClient::upstream_http` so CPR owns the account proxy, HTTP lifecycle, timeout, send watermark and observation.
 - The adapter registers `http_sse` as its transport; every `ResponseObservation.transport` uses that same value for both JSON and SSE responses.
-- Non-stream: `:generateContent` JSON; wrap the completed response in a typed `response.completed` `WirePayload::Json` event with the full response under `response`, allowing CPR `collect_response` to identify the terminal object.
-- Stream: `:streamGenerateContent?alt=sse`; parse Vertex SSE incrementally and emit OpenAI Responses SSE frames through a bounded CPR response stream.
+- Both downstream modes: `:streamGenerateContent?alt=sse`; CPR returns the upstream response headers before model generation finishes. The adapter immediately returns `TypedReply::with_stream`, moving body reads into the CPR resource-stream lifecycle rather than the 120-second `initial_reply` stage.
+- Downstream `stream:false`: parse Vertex SSE incrementally, collect only non-thought text plus usage / finish reason, then emit one terminal `response.completed` `WirePayload::Json` event for CPR JSON delivery.
+- Downstream `stream:true`: emit OpenAI Responses SSE start / text-delta / completion events through a bounded CPR response stream.
+- When `reasoning.effort` is explicit, request `thinkingConfig.includeThoughts=true`. Thought-only frames are valid keepalives that reset the upstream read wait; thought text is discarded and never forwarded to the caller.
 - Token usage maps from `usageMetadata`; CPR performs its own model pricing and metering.
 
 ## Known limitations

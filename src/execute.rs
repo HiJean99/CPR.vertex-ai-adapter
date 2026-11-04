@@ -1,4 +1,4 @@
-//! CPR 受管 Vertex HTTP 请求。非流式返回 JSON，流式以有界通道实时转发 SSE。
+//! CPR 受管 Vertex SSE 请求。下游 JSON 在完整读取后发出终态事件，SSE 实时转发。
 
 use std::{num::NonZeroUsize, time::Duration};
 
@@ -22,7 +22,6 @@ use crate::{
     translate,
 };
 
-const MAX_JSON_BYTES: usize = 8 * 1024 * 1024;
 const MAX_SSE_BUFFER_BYTES: usize = 2 * 1024 * 1024;
 
 fn response_observation() -> ResponseObservation {
@@ -60,16 +59,12 @@ pub async fn run(
         ));
     }
     let token = auth::access_token(config).await?;
-    let (body, streaming) = translate::request_to_vertex(&call.payload)?;
-    let path = Config::project_path(&selection.project_id, &selection.location, model, streaming)?;
+    let (body, downstream_streaming) = translate::request_to_vertex(&call.payload)?;
+    let path = Config::project_path(&selection.project_id, &selection.location, model)?;
     let request = UpstreamHttpRequest {
         method: "POST".to_owned(),
         path,
-        query: if streaming {
-            vec![("alt".to_owned(), "sse".to_owned())]
-        } else {
-            vec![]
-        },
+        query: vec![("alt".to_owned(), "sse".to_owned())],
         headers: vec![
             (
                 "authorization".to_owned(),
@@ -80,14 +75,7 @@ pub async fn run(
                 selection.project_id.as_bytes().to_vec(),
             ),
             ("content-type".to_owned(), b"application/json".to_vec()),
-            (
-                "accept".to_owned(),
-                if streaming {
-                    b"text/event-stream".to_vec()
-                } else {
-                    b"application/json".to_vec()
-                },
-            ),
+            ("accept".to_owned(), b"text/event-stream".to_vec()),
         ],
     };
     let response = call.host.upstream_http(request, body).await?;
@@ -103,29 +91,29 @@ pub async fn run(
         return single_event(event).await;
     }
 
-    if !streaming {
-        let raw = response.body.collect(MAX_JSON_BYTES).await?;
-        let mut event = translate::response_to_event(&raw, &call.request.upstream_model)?;
-        let mut observation = response_observation();
-        observation.http_version = Some(http_version);
-        observation.status_code = Some(status);
-        event.observation = Some(observation);
-        return single_event(event).await;
-    }
-
     let ids = translate::StreamIds::new(&call.request.upstream_model);
     let (sender, stream) = ResponseStream::channel(NonZeroUsize::new(4).expect("nonzero channel"));
-    let mut starts = translate::stream_start_events(&ids);
-    if let Some(first) = starts.first_mut() {
-        let mut observation = response_observation();
-        observation.http_version = Some(http_version);
-        observation.status_code = Some(status);
-        first.observation = Some(observation);
+    let mut observation = response_observation();
+    observation.http_version = Some(http_version);
+    observation.status_code = Some(status);
+    if downstream_streaming {
+        let mut starts = translate::stream_start_events(&ids);
+        if let Some(first) = starts.first_mut() {
+            first.observation = Some(observation);
+        }
+        for event in starts {
+            send_event(&sender, event).await?;
+        }
+        tokio::spawn(stream_response(response.body, sender, ids, true, None));
+    } else {
+        tokio::spawn(stream_response(
+            response.body,
+            sender,
+            ids,
+            false,
+            Some(observation),
+        ));
     }
-    for event in starts {
-        send_event(&sender, event).await?;
-    }
-    tokio::spawn(stream_response(response.body, sender, ids));
     Ok(TypedReply::new(Empty {}).with_stream(stream))
 }
 
@@ -174,6 +162,8 @@ async fn stream_response(
     mut body: gateway_plugin_sdk::client::HostHttpBody,
     sender: StreamSender,
     ids: translate::StreamIds,
+    downstream_streaming: bool,
+    observation: Option<ResponseObservation>,
 ) {
     let mut decoder = SseDecoder::default();
     let mut sequence = 3_u64;
@@ -217,16 +207,18 @@ async fn stream_response(
             };
             if !delta.text.is_empty() {
                 full_text.push_str(&delta.text);
-                if send_event(
-                    &sender,
-                    translate::stream_text_event(&ids, sequence, &delta.text),
-                )
-                .await
-                .is_err()
-                {
-                    return;
+                if downstream_streaming {
+                    if send_event(
+                        &sender,
+                        translate::stream_text_event(&ids, sequence, &delta.text),
+                    )
+                    .await
+                    .is_err()
+                    {
+                        return;
+                    }
+                    sequence += 1;
                 }
-                sequence += 1;
             }
             if let Some(new_usage) = delta.usage {
                 usage = new_usage;
@@ -244,16 +236,18 @@ async fn stream_response(
             Ok(delta) => {
                 if !delta.text.is_empty() {
                     full_text.push_str(&delta.text);
-                    if send_event(
-                        &sender,
-                        translate::stream_text_event(&ids, sequence, &delta.text),
-                    )
-                    .await
-                    .is_err()
-                    {
-                        return;
+                    if downstream_streaming {
+                        if send_event(
+                            &sender,
+                            translate::stream_text_event(&ids, sequence, &delta.text),
+                        )
+                        .await
+                        .is_err()
+                        {
+                            return;
+                        }
+                        sequence += 1;
                     }
-                    sequence += 1;
                 }
                 if let Some(new_usage) = delta.usage {
                     usage = new_usage;
@@ -274,16 +268,17 @@ async fn stream_response(
             .await;
         return;
     }
-    for event in translate::stream_complete_events(
-        &ids,
-        sequence,
-        &full_text,
-        usage,
-        finish_reason.unwrap_or(gateway_plugin_sdk::call::model::FinishReason::Stop),
-    ) {
-        if send_event(&sender, event).await.is_err() {
-            return;
+    let reason = finish_reason.unwrap_or(gateway_plugin_sdk::call::model::FinishReason::Stop);
+    if downstream_streaming {
+        for event in translate::stream_complete_events(&ids, sequence, &full_text, usage, reason) {
+            if send_event(&sender, event).await.is_err() {
+                return;
+            }
         }
+    } else {
+        let mut event = translate::completed_response_event(&ids, &full_text, usage, reason);
+        event.observation = observation;
+        let _ = send_event(&sender, event).await;
     }
 }
 
