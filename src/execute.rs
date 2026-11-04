@@ -25,6 +25,11 @@ use crate::{
 const MAX_JSON_BYTES: usize = 8 * 1024 * 1024;
 const MAX_SSE_BUFFER_BYTES: usize = 2 * 1024 * 1024;
 
+fn response_observation() -> ResponseObservation {
+    // 观测传输必须与注册声明一致；非流式请求只是同一适配器的另一种响应编码
+    ResponseObservation::new(config::UPSTREAM_TRANSPORT.as_str())
+}
+
 pub async fn run(
     config: &Config,
     call: TypedCall<UpstreamAdapterRequest>,
@@ -91,8 +96,7 @@ pub async fn run(
     if !(200..300).contains(&status) {
         let raw = response.body.collect(2 * 1024 * 1024).await?;
         let mut event = upstream_error(&raw, status);
-        let mut observation =
-            ResponseObservation::new(if streaming { "http_sse" } else { "http_json" });
+        let mut observation = response_observation();
         observation.http_version = Some(http_version);
         observation.status_code = Some(status);
         event.observation = Some(observation);
@@ -102,7 +106,7 @@ pub async fn run(
     if !streaming {
         let raw = response.body.collect(MAX_JSON_BYTES).await?;
         let mut event = translate::response_to_event(&raw, &call.request.upstream_model)?;
-        let mut observation = ResponseObservation::new("http_json");
+        let mut observation = response_observation();
         observation.http_version = Some(http_version);
         observation.status_code = Some(status);
         event.observation = Some(observation);
@@ -113,7 +117,7 @@ pub async fn run(
     let (sender, stream) = ResponseStream::channel(NonZeroUsize::new(4).expect("nonzero channel"));
     let mut starts = translate::stream_start_events(&ids);
     if let Some(first) = starts.first_mut() {
-        let mut observation = ResponseObservation::new("http_sse");
+        let mut observation = response_observation();
         observation.http_version = Some(http_version);
         observation.status_code = Some(status);
         first.observation = Some(observation);
@@ -397,6 +401,16 @@ fn invalid(message: &'static str) -> PluginFault {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn response_observation_matches_registered_adapter_transport() {
+        let adapter = Config::adapter_registration("acct_vertex_test")
+            .adapters
+            .into_iter()
+            .next()
+            .unwrap();
+        assert_eq!(response_observation().transport, adapter.transport.as_str());
+    }
 
     #[test]
     fn decoder_handles_chunk_boundaries_and_crlf() {

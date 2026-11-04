@@ -19,6 +19,7 @@ pub const MODEL_PREFIX: &str = "vertex/google/";
 pub const ACCOUNT_MARKER: &str = "mingli42.vertex-ai-adapter";
 pub const GROUP_RESOURCE_KEY: &str = "vertex-ai";
 pub const GROUP_NAME: &str = "Vertex AI";
+pub const UPSTREAM_TRANSPORT: UpstreamTransport = UpstreamTransport::HttpSse;
 
 /// CPR 在发布时冻结模型目录，因此第一版使用经过公开上游实现交叉核对的
 /// Gemini 文本模型 allowlist；不把未经发现的模型虚构成可用模型。
@@ -151,7 +152,7 @@ impl Config {
                 base_url: Self::project_base_url().to_owned(),
                 paths: vec![],
                 authentication_kinds: vec!["api_key".to_owned()],
-                transport: UpstreamTransport::HttpSse,
+                transport: UPSTREAM_TRANSPORT,
                 protocol: "openai".to_owned(),
                 // CPR 3.38.2 requires a non-empty static account scope when
                 // a contributed model references this adapter.
@@ -248,7 +249,7 @@ mod tests {
         assert!(adapter.models.is_empty());
         assert_eq!(adapter.account_ids, ["acct_vertex_test"]);
         assert_eq!(adapter.authentication_kinds, ["api_key"]);
-        assert_eq!(adapter.transport, UpstreamTransport::HttpSse);
+        assert_eq!(adapter.transport, UPSTREAM_TRANSPORT);
         let catalog = Config::catalog_registration();
         assert_eq!(catalog.models.len(), GEMINI_MODELS.len());
         assert!(
