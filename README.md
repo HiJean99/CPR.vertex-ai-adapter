@@ -1,6 +1,6 @@
-# CPR Vertex AI Adapter v0.2.6
+# CPR Vertex AI Adapter v0.2.7
 
-A CPR 3.38.2+ plugin that connects one Google account through the official Google Cloud CLI (gcloud) ADC flow and routes Gemini text requests to Google Vertex AI.
+A CPR 3.38.2+ plugin that connects one Google account through the official Google Cloud CLI (gcloud) ADC flow and routes Gemini 4 Argon text requests to Google Vertex AI.
 
 ## What it does
 
@@ -9,7 +9,8 @@ A CPR 3.38.2+ plugin that connects one Google account through the official Googl
 - One Google account and one selected project per plugin instance.
 - ADC and gcloud config live under the persistent CPR data directory, separate from the Codex accounts and keys.
 - Creates one managed OpenAI API-key placeholder account during adapter registration (required by CPR static model-catalog validation), then creates the dedicated `Vertex AI` account group from the management page and adds the account after project verification.
-- Gemini text Responses API, both non-streaming JSON and streaming SSE.
+- Gemini 4 Argon text Responses API, both non-streaming JSON and streaming SSE
+- OpenAI `reasoning.effort` maps to Gemini 4 `thinkingLevel` (`low`, `medium`, `high`)
 - Uses CPR managed upstream HTTP, account scheduling, usage metering, and the selected account's outbound proxy.
 
 ## Runtime dependency
@@ -31,7 +32,7 @@ The 2026-11-03 Google Cloud CLI 592.0.0 archive is documented at <https://docs.c
 3. Copy the Google authorization URL and open it manually in a separate browser tab, sign in and approve. The CPR plugin iframe intentionally does not navigate to external URLs.
 4. Paste the one-time authorization code back into CPR.
 5. Select the Cloud Project that owns the billing account / promotional credits.
-6. The plugin checks `aiplatform.googleapis.com` and the project's billing status. It does not enable APIs or change billing automatically.
+6. The plugin checks `aiplatform.googleapis.com` and the project's billing status. It does not enable APIs or change billing automatically. For Standard PayGo, Gemini 4 Argon is available in `global`, `us` and `eu` locations.
 7. The plugin reuses the registration-time placeholder account and adds it to the `Vertex AI` account group.
 
 The code is sent to the gcloud subprocess stdin and is not stored in plugin state, browser storage or logs. gcloud writes ADC to a private directory (directory mode 0700, ADC file mode 0600). Disconnect removes that plugin-owned ADC directory and removes the managed account from the Vertex group; it does not delete the Google Cloud project or billing account.
@@ -44,11 +45,8 @@ The plugin creates one managed OpenAI API-key placeholder account during adapter
 
 - Stage: `upstream`
 - Provider: `openai`
-- Models: add these four exact IDs individually (do not use a wildcard):
-  - `vertex/google/gemini-3.8-flash` (GA)
-  - `vertex/google/gemini-3.5-flash` (GA)
-  - `vertex/google/gemini-3.5-flash-lite` (GA)
-  - `vertex/google/gemini-3.1-pro-preview` (Preview)
+- Models: add this one exact ID (do not use a wildcard):
+  - `vertex/google/gemini-4-argon` (GA)
 - Account group scope: empty
 - Client Key scope: empty
 - Failure policy: `reject`
@@ -57,16 +55,15 @@ The adapter binding must not use an account-group or Client-Key scope: CPR's sta
 
 ## Model catalog and supported request scope
 
-The CPR model catalog is static at plugin registration. v0.2.6 exposes:
+The CPR model catalog is static at plugin registration. v0.2.7 exposes exactly one model:
 
-- `vertex/google/gemini-3.8-flash` (GA)
-- `vertex/google/gemini-3.5-flash` (GA)
-- `vertex/google/gemini-3.5-flash-lite` (GA)
-- `vertex/google/gemini-3.1-pro-preview` (Preview)
+- `vertex/google/gemini-4-argon` (GA)
 
-Gemini 2.5 Flash and Gemini 2.5 Pro reached their Vertex AI retirement date on 2026-10-20 and are intentionally excluded. See [Google's model lifecycle table](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/model-versions) for current model IDs and retirement dates. CPR account-level OpenAI model discovery (`GET /v1/models`) is a separate path and is not supported by Vertex AI; a failure there must not be used as an inference health check. The adapter contributes its own static model catalog and sends inference to the project/location-specific `generateContent` and `streamGenerateContent` endpoints.
+CPR account-level OpenAI model discovery (`GET /v1/models`) is a separate path and is not supported by Vertex AI; a failure there must not be used as an inference health check. The adapter contributes its own static model catalog and sends inference to the project/location-specific `generateContent` and `streamGenerateContent` endpoints.
 
-Supported request protocol: OpenAI Responses text input/output. Both `stream:false` and `stream:true` are supported. Non-streaming output is represented as a typed `response.completed` wire event containing the complete response object, so CPR can collect the terminal response for JSON delivery. The adapter currently rejects tools, images, audio, native `previous_response_id` continuation and unsupported reasoning options. Model availability still depends on the selected project's Vertex AI permissions, location and model access.
+Supported request protocol: OpenAI Responses text input/output. Both `stream:false` and `stream:true` are supported. Non-streaming output is represented as a typed `response.completed` wire event containing the complete response object, so CPR can collect the terminal response for JSON delivery. OpenAI `reasoning.effort` values `low`, `medium` and `high` map to Gemini 4 `thinkingConfig.thinkingLevel`; the model defaults to `MEDIUM`. `temperature`, `top_p` and `top_k` are ignored by Gemini 4 and are not forwarded. The adapter rejects `minimal`, `none`, `xhigh`, tools, images, audio and native `previous_response_id` continuation. `reasoning.summary` accepts the OpenAI values `auto`, `concise` and `detailed` but is ignored because this adapter does not emit a separate reasoning summary.
+
+Gemini 4 uses a unified 1,048,576-token input/output budget. This adapter caps a single non-streaming direct HTTP request at 32,768 output tokens and a streaming request at 65,536 output tokens. Long-decode continuation up to 1,048,576 tokens is not implemented; it requires the `v1beta1` continuation-token flow. The model itself supports additional modalities, but this adapter exposes text-only Responses. Model availability still depends on the selected project's Vertex AI permissions, location and model access.
 
 ## Billing and promotional credits
 

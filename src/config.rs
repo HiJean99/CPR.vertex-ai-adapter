@@ -1,4 +1,4 @@
-//! CPR 3.38+ 兼容配置、固定 Gemini 文本模型目录和安全路径校验。
+//! CPR 3.38+ 兼容配置、Gemini 4 Argon 模型目录和安全路径校验。
 
 use std::path::PathBuf;
 
@@ -20,15 +20,9 @@ pub const ACCOUNT_MARKER: &str = "mingli42.vertex-ai-adapter";
 pub const GROUP_RESOURCE_KEY: &str = "vertex-ai";
 pub const GROUP_NAME: &str = "Vertex AI";
 pub const UPSTREAM_TRANSPORT: UpstreamTransport = UpstreamTransport::HttpSse;
-
-/// CPR 在发布时冻结模型目录，因此第一版使用经过公开上游实现交叉核对的
-/// Gemini 文本模型 allowlist；不把未经发现的模型虚构成可用模型。
-pub const GEMINI_MODELS: &[(&str, &str)] = &[
-    ("gemini-3.8-flash", "Gemini 3.8 Flash"),
-    ("gemini-3.5-flash", "Gemini 3.5 Flash"),
-    ("gemini-3.5-flash-lite", "Gemini 3.5 Flash-Lite"),
-    ("gemini-3.1-pro-preview", "Gemini 3.1 Pro Preview"),
-];
+pub const GEMINI_MODEL_ID: &str = "gemini-4-argon";
+pub const GEMINI_MODEL_NAME: &str = "Gemini 4 Argon";
+pub const GEMINI4_LOCATIONS: &[&str] = &["global", "us", "eu"];
 
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -138,10 +132,7 @@ impl Config {
 
     pub fn upstream_model(public_model: &str) -> Option<&str> {
         let model = public_model.strip_prefix(MODEL_PREFIX)?;
-        GEMINI_MODELS
-            .iter()
-            .any(|(known, _)| *known == model)
-            .then_some(model)
+        (model == GEMINI_MODEL_ID).then_some(GEMINI_MODEL_ID)
     }
 
     pub fn adapter_registration(account_id: &str) -> UpstreamAdapterRegistration {
@@ -165,19 +156,19 @@ impl Config {
     pub fn catalog_registration() -> ModelCatalogRegistrationV2 {
         ModelCatalogRegistrationV2 {
             aliases: vec![],
-            models: GEMINI_MODELS.iter().map(|(model, display_name)| AdaptedModel {
-                id: Self::public_model(model),
+            models: vec![AdaptedModel {
+                id: Self::public_model(GEMINI_MODEL_ID),
                 adapter_id: ADAPTER_ID.to_owned(),
                 features: vec![],
-                max_output_tokens: Some(65_536),
+                max_output_tokens: Some(32_768),
                 presentation: ModelPresentation {
-                    display_name: Some((*display_name).to_owned()),
-                    description: Some("Gemini text generation via Google Vertex AI. Availability depends on the selected project and location.".to_owned()),
+                    display_name: Some(GEMINI_MODEL_NAME.to_owned()),
+                    description: Some("Gemini 4 Argon via Vertex AI. The input and output share a 1,048,576-token budget; this adapter exposes text-only Responses.".to_owned()),
                     context_window_tokens: Some(1_048_576),
                     max_context_window_tokens: Some(1_048_576),
                     ..ModelPresentation::default()
                 },
-            }).collect(),
+            }],
         }
     }
 }
@@ -192,12 +183,7 @@ pub fn valid_project_id(input: &str) -> bool {
 }
 
 pub fn valid_location(input: &str) -> bool {
-    (2..=64).contains(&input.len())
-        && input
-            .bytes()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
-        && !input.starts_with('-')
-        && !input.ends_with('-')
+    GEMINI4_LOCATIONS.contains(&input)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -217,31 +203,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn project_path_is_validated_and_uses_vertex_publisher_path() {
+    fn project_path_is_validated_and_uses_the_gemini_4_vertex_path() {
         assert_eq!(
-            Config::project_path("example-project-123", "global", "gemini-3.8-flash", false)
-                .unwrap(),
-            "projects/example-project-123/locations/global/publishers/google/models/gemini-3.8-flash:generateContent"
+            Config::project_path("example-project-123", "global", GEMINI_MODEL_ID, false).unwrap(),
+            "projects/example-project-123/locations/global/publishers/google/models/gemini-4-argon:generateContent"
         );
-        assert!(
-            Config::project_path("../evil-project", "global", "gemini-3.8-flash", false).is_err()
-        );
+        assert!(Config::project_path("../evil-project", "global", GEMINI_MODEL_ID, false).is_err());
         assert!(
             Config::project_path(
                 "example-project-123",
                 "global.example.com",
-                "gemini-3.8-flash",
+                GEMINI_MODEL_ID,
                 false
             )
             .is_err()
         );
         assert!(
-            Config::project_path("example-project-123", "global", "gemini-unknown", false).is_err()
+            Config::project_path("example-project-123", "global", "gemini-3.8-flash", false)
+                .is_err()
         );
     }
 
     #[test]
-    fn registration_declares_the_managed_account_and_supported_models() {
+    fn registration_declares_one_gemini_4_model_and_the_managed_account() {
         let adapter = Config::adapter_registration("acct_vertex_test")
             .adapters
             .pop()
@@ -250,35 +234,39 @@ mod tests {
         assert_eq!(adapter.account_ids, ["acct_vertex_test"]);
         assert_eq!(adapter.authentication_kinds, ["api_key"]);
         assert_eq!(adapter.transport, UPSTREAM_TRANSPORT);
+
         let catalog = Config::catalog_registration();
-        assert_eq!(catalog.models.len(), GEMINI_MODELS.len());
-        assert!(
-            catalog
-                .models
-                .iter()
-                .all(|m| m.id.starts_with(MODEL_PREFIX))
+        assert_eq!(catalog.models.len(), 1);
+        assert_eq!(catalog.models[0].id, "vertex/google/gemini-4-argon");
+        assert_eq!(catalog.models[0].max_output_tokens, Some(32_768));
+        assert_eq!(
+            catalog.models[0].presentation.display_name.as_deref(),
+            Some("Gemini 4 Argon")
         );
     }
 
     #[test]
-    fn catalog_uses_current_models_and_excludes_retired_gemini_25_ids() {
-        let catalog = Config::catalog_registration();
-        let ids: Vec<_> = catalog
-            .models
-            .iter()
-            .map(|model| model.id.as_str())
-            .collect();
+    fn only_gemini_4_argon_is_routable_and_only_supported_locations_are_accepted() {
         assert_eq!(
-            ids,
-            [
-                "vertex/google/gemini-3.8-flash",
-                "vertex/google/gemini-3.5-flash",
-                "vertex/google/gemini-3.5-flash-lite",
-                "vertex/google/gemini-3.1-pro-preview",
-            ]
+            Config::upstream_model("vertex/google/gemini-4-argon"),
+            Some("gemini-4-argon")
         );
-        assert!(Config::upstream_model("vertex/google/gemini-2.5-flash").is_none());
-        assert!(Config::upstream_model("vertex/google/gemini-2.5-pro").is_none());
+        for retired in [
+            "vertex/google/gemini-3.8-flash",
+            "vertex/google/gemini-3.5-flash",
+            "vertex/google/gemini-3.5-flash-lite",
+            "vertex/google/gemini-3.1-pro-preview",
+        ] {
+            assert!(Config::upstream_model(retired).is_none());
+        }
+        for location in GEMINI4_LOCATIONS {
+            assert!(valid_location(location));
+        }
+        assert!(!valid_location("us-central1"));
+        assert!(!valid_location("us-east5"));
+        assert!(!valid_location("europe-west4"));
+        assert!(!valid_location("europe-west2"));
+        assert!(!valid_location("asia-southeast1"));
     }
 
     #[test]

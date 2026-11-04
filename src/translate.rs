@@ -1,4 +1,4 @@
-//! OpenAI Responses 文本请求与 Vertex Gemini JSON / SSE 的有限协议转换。
+//! OpenAI Responses 文本请求与 Vertex Gemini 4 Argon JSON / SSE 的协议转换。
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -12,8 +12,51 @@ use gateway_plugin_sdk::{
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+const MAX_NON_STREAMING_OUTPUT_TOKENS: u64 = 32_768;
+const MAX_STREAMING_OUTPUT_TOKENS: u64 = 65_536;
+
 fn invalid(message: &'static str) -> PluginFault {
     PluginFault::new(ErrorCode::InvalidInput, message)
+}
+
+fn thinking_level(
+    object: &serde_json::Map<String, Value>,
+) -> Result<Option<&'static str>, PluginFault> {
+    let Some(reasoning) = object.get("reasoning").filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    let reasoning = reasoning
+        .as_object()
+        .ok_or_else(|| invalid("Reasoning must be an object with an effort field."))?;
+    if reasoning
+        .keys()
+        .any(|key| key != "effort" && key != "summary")
+    {
+        return Err(invalid(
+            "Only reasoning.effort and reasoning.summary are accepted by the Gemini 4 adapter.",
+        ));
+    }
+    if let Some(summary) = reasoning.get("summary").filter(|value| !value.is_null())
+        && !matches!(summary.as_str(), Some("auto" | "concise" | "detailed"))
+    {
+        return Err(invalid(
+            "Reasoning summary must be auto, concise, or detailed.",
+        ));
+    }
+    let Some(effort) = reasoning.get("effort").filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    let effort = effort
+        .as_str()
+        .ok_or_else(|| invalid("Reasoning effort must be low, medium, or high."))?;
+    match effort.to_ascii_lowercase().as_str() {
+        "low" => Ok(Some("LOW")),
+        "medium" => Ok(Some("MEDIUM")),
+        "high" => Ok(Some("HIGH")),
+        _ => Err(invalid(
+            "Gemini 4 supports reasoning effort low, medium, or high.",
+        )),
+    }
 }
 
 fn text_content(value: &Value) -> Result<String, PluginFault> {
@@ -76,7 +119,10 @@ pub fn request_to_vertex(input: &[u8]) -> Result<(Vec<u8>, bool), PluginFault> {
         "modalities",
         "include",
         "truncation",
-        "reasoning",
+        "frequency_penalty",
+        "presence_penalty",
+        "candidate_count",
+        "thinking_budget",
     ] {
         if object
             .get(unsupported)
@@ -138,27 +184,46 @@ pub fn request_to_vertex(input: &[u8]) -> Result<(Vec<u8>, bool), PluginFault> {
             "At least one user or assistant message is required.",
         ));
     }
+    if contents
+        .last()
+        .and_then(|content| content.get("role"))
+        .and_then(Value::as_str)
+        == Some("model")
+    {
+        return Err(invalid(
+            "Gemini 4 input history cannot end with a prefilled model turn.",
+        ));
+    }
     let mut request = json!({"contents":contents});
     if !system.is_empty() {
         request["systemInstruction"] = json!({"parts":[{"text":system.join("\n\n")}]});
     }
     let mut options = serde_json::Map::new();
-    for (openai, vertex) in [
-        ("max_output_tokens", "maxOutputTokens"),
-        ("temperature", "temperature"),
-        ("top_p", "topP"),
-    ] {
-        if let Some(value) = object.get(openai) {
-            if !value.is_number()
-                || value
-                    .as_f64()
-                    .is_none_or(|number| !number.is_finite() || number < 0.0)
-            {
-                return Err(invalid("Generation settings must be nonnegative numbers."));
-            }
-            options.insert(vertex.to_owned(), value.clone());
-        }
+    if let Some(value) = object
+        .get("max_output_tokens")
+        .filter(|value| !value.is_null())
+    {
+        let maximum = if streaming {
+            MAX_STREAMING_OUTPUT_TOKENS
+        } else {
+            MAX_NON_STREAMING_OUTPUT_TOKENS
+        };
+        let tokens = value
+            .as_u64()
+            .filter(|tokens| (1..=maximum).contains(tokens))
+            .ok_or_else(|| {
+                if streaming {
+                    invalid("Gemini 4 streaming requests support max_output_tokens from 1 to 65536.")
+                } else {
+                    invalid("Gemini 4 non-streaming requests support max_output_tokens from 1 to 32768.")
+                }
+            })?;
+        options.insert("maxOutputTokens".to_owned(), Value::from(tokens));
     }
+    if let Some(level) = thinking_level(object)? {
+        options.insert("thinkingConfig".to_owned(), json!({"thinkingLevel":level}));
+    }
+    // Gemini 4 ignores temperature, top_p and top_k; do not forward misleading controls.
     if !options.is_empty() {
         request["generationConfig"] = Value::Object(options);
     }
@@ -389,23 +454,35 @@ fn stream_wire_event(
 }
 
 fn completed_response(ids: &StreamIds, text: &str, usage: &Usage) -> Value {
-    json!({
+    let mut response = json!({
         "id":ids.response_id,"object":"response","created_at":ids.created_at,"status":"completed","model":ids.model,
         "output":[{"id":ids.item_id,"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":text,"annotations":[]}]}],
         "usage":{"input_tokens":usage.input_tokens,"output_tokens":usage.output_tokens,"total_tokens":usage.total_tokens}
-    })
+    });
+    if let Some(reasoning_tokens) = usage.reasoning_tokens {
+        response["usage"]["output_tokens_details"] = json!({"reasoning_tokens":reasoning_tokens});
+    }
+    response
 }
 
 pub fn usage_from_vertex(root: &Value) -> Usage {
     let prompt = root
         .pointer("/usageMetadata/promptTokenCount")
         .and_then(Value::as_u64);
-    let output = root
+    let candidate_output = root
         .pointer("/usageMetadata/candidatesTokenCount")
         .and_then(Value::as_u64);
     let cached = root
         .pointer("/usageMetadata/cachedContentTokenCount")
         .and_then(Value::as_u64);
+    let reasoning = root
+        .pointer("/usageMetadata/thoughtsTokenCount")
+        .and_then(Value::as_u64);
+    let output = candidate_output
+        .zip(reasoning)
+        .map(|(candidate, thoughts)| candidate.saturating_add(thoughts))
+        .or(candidate_output)
+        .or(reasoning);
     let total = root
         .pointer("/usageMetadata/totalTokenCount")
         .and_then(Value::as_u64)
@@ -414,6 +491,7 @@ pub fn usage_from_vertex(root: &Value) -> Usage {
         input_tokens: prompt,
         output_tokens: output,
         cached_tokens: cached,
+        reasoning_tokens: reasoning,
         total_tokens: total,
         ..Usage::default()
     }
@@ -435,8 +513,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn converts_openai_responses_and_preserves_stream_flag() {
-        let input = json!({"model":"vertex/google/gemini-3.5-flash","instructions":"Be concise","input":[{"role":"user","content":[{"type":"input_text","text":"Hello"}]},{"role":"assistant","content":[{"type":"output_text","text":"Hi"}]}],"temperature":0.2});
+    fn translates_responses_and_gemini_4_reasoning_effort() {
+        let input = json!({
+            "model":"vertex/google/gemini-4-argon",
+            "instructions":"Be concise",
+            "input":[
+                {"role":"user","content":[{"type":"input_text","text":"Hello"}]},
+                {"role":"assistant","content":[{"type":"output_text","text":"Hi"}]},
+                {"role":"user","content":[{"type":"input_text","text":"Continue"}]}
+            ],
+            "max_output_tokens":1024,
+            "reasoning":{"effort":"HIGH"},
+            "temperature":0.2,
+            "top_p":0.8,
+            "top_k":20
+        });
         let (body, stream) = request_to_vertex(input.to_string().as_bytes()).unwrap();
         let result: Value = serde_json::from_slice(&body).unwrap();
         assert!(!stream);
@@ -447,13 +538,78 @@ mod tests {
             "Be concise"
         );
         assert_eq!(
-            result.pointer("/generationConfig/temperature").unwrap(),
-            0.2
+            result.pointer("/generationConfig/maxOutputTokens").unwrap(),
+            1024
         );
+        assert_eq!(
+            result
+                .pointer("/generationConfig/thinkingConfig/thinkingLevel")
+                .unwrap(),
+            "HIGH"
+        );
+        assert!(result.pointer("/generationConfig/temperature").is_none());
+        assert!(result.pointer("/generationConfig/topP").is_none());
+        assert!(result.pointer("/generationConfig/topK").is_none());
+
         let (stream_body, stream) =
             request_to_vertex(br#"{"input":"Hello","stream":true}"#).unwrap();
         assert!(stream);
         assert!(serde_json::from_slice::<Value>(&stream_body).is_ok());
+    }
+
+    #[test]
+    fn defaults_to_gemini_4_medium_thinking_and_rejects_unsupported_levels() {
+        let (body, _) = request_to_vertex(br#"{"input":"Hello"}"#).unwrap();
+        let result: Value = serde_json::from_slice(&body).unwrap();
+        assert!(result.pointer("/generationConfig/thinkingConfig").is_none());
+
+        for effort in ["minimal", "none", "xhigh"] {
+            let input = json!({"input":"Hello","reasoning":{"effort":effort}});
+            assert!(request_to_vertex(input.to_string().as_bytes()).is_err());
+        }
+        let (body, _) = request_to_vertex(
+            br#"{"input":"Hello","reasoning":{"effort":"high","summary":"auto"}}"#,
+        )
+        .unwrap();
+        let result: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            result
+                .pointer("/generationConfig/thinkingConfig/thinkingLevel")
+                .unwrap(),
+            "HIGH"
+        );
+        assert!(
+            request_to_vertex(
+                br#"{"input":"Hello","reasoning":{"effort":"high","summary":"verbose"}}"#
+            )
+            .is_err()
+        );
+        for field in [
+            "frequency_penalty",
+            "presence_penalty",
+            "candidate_count",
+            "thinking_budget",
+        ] {
+            let input = format!(r#"{{"input":"Hello","{field}":1}}"#);
+            assert!(request_to_vertex(input.as_bytes()).is_err());
+        }
+        assert!(
+            request_to_vertex(br#"{"input":[{"role":"assistant","content":"prefilled"}]}"#)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn enforces_gemini_4_single_request_output_limits() {
+        assert!(request_to_vertex(br#"{"input":"Hello","max_output_tokens":32769}"#).is_err());
+        assert!(
+            request_to_vertex(br#"{"input":"Hello","stream":true,"max_output_tokens":65536}"#)
+                .is_ok()
+        );
+        assert!(
+            request_to_vertex(br#"{"input":"Hello","stream":true,"max_output_tokens":65537}"#)
+                .is_err()
+        );
     }
 
     #[test]
@@ -469,14 +625,14 @@ mod tests {
 
     #[test]
     fn converts_non_stream_response_to_completed_wire_and_preserves_usage() {
-        let raw = json!({"candidates":[{"content":{"role":"model","parts":[{"text":"Hello"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2,"totalTokenCount":12}});
-        let event = response_to_event(raw.to_string().as_bytes(), "vertex/google/gemini-3.8-flash")
-            .unwrap();
+        let raw = json!({"candidates":[{"content":{"role":"model","parts":[{"text":"Hello"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2,"thoughtsTokenCount":7,"totalTokenCount":19}});
+        let event =
+            response_to_event(raw.to_string().as_bytes(), "vertex/google/gemini-4-argon").unwrap();
         let decoded = UpstreamAdapterEvent::decode(&event.encode().unwrap()).unwrap();
 
         assert_eq!(decoded.event.facts.len(), 5);
         assert!(
-            matches!(&decoded.event.facts[3], CanonicalEvent::Usage { usage } if usage.input_tokens == Some(10) && usage.output_tokens == Some(2) && usage.total_tokens == Some(12))
+            matches!(&decoded.event.facts[3], CanonicalEvent::Usage { usage } if usage.input_tokens == Some(10) && usage.output_tokens == Some(9) && usage.reasoning_tokens == Some(7) && usage.total_tokens == Some(19))
         );
         assert!(matches!(
             &decoded.event.facts[4],
@@ -502,16 +658,20 @@ mod tests {
         assert_eq!(data["type"], "response.completed");
         assert_eq!(data["sequence_number"], 0);
         assert_eq!(data["response"]["status"], "completed");
-        assert_eq!(data["response"]["model"], "vertex/google/gemini-3.8-flash");
+        assert_eq!(data["response"]["model"], "vertex/google/gemini-4-argon");
         assert_eq!(data["response"]["output"][0]["content"][0]["text"], "Hello");
         assert_eq!(data["response"]["usage"]["input_tokens"], 10);
-        assert_eq!(data["response"]["usage"]["output_tokens"], 2);
-        assert_eq!(data["response"]["usage"]["total_tokens"], 12);
+        assert_eq!(data["response"]["usage"]["output_tokens"], 9);
+        assert_eq!(
+            data["response"]["usage"]["output_tokens_details"]["reasoning_tokens"],
+            7
+        );
+        assert_eq!(data["response"]["usage"]["total_tokens"], 19);
     }
 
     #[test]
     fn builds_openai_responses_sse_events() {
-        let ids = StreamIds::new("vertex/google/gemini-3.8-flash");
+        let ids = StreamIds::new("vertex/google/gemini-4-argon");
         let start = stream_start_events(&ids);
         assert_eq!(start.len(), 3);
         let delta = stream_text_event(&ids, 3, "Hello");

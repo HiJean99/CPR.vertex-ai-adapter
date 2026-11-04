@@ -12,7 +12,7 @@
     <section class="panel">
       <div class="eyebrow">GOOGLE CLOUD</div>
       <h1>Vertex AI</h1>
-      <p class="lead">Connect one Google account and route Gemini requests through your existing CPR gateway.</p>
+      <p class="lead">Connect one Google account and route Gemini 4 Argon requests through your existing CPR gateway.</p>
       <div id="notice" class="notice" role="status" aria-live="polite">Checking plugin status…</div>
     </section>
 
@@ -44,9 +44,8 @@
       <label for="location">Vertex AI location</label>
       <select id="location">
         <option value="global">global</option>
-        <option value="us-central1">us-central1</option>
-        <option value="us-east5">us-east5</option>
-        <option value="europe-west4">europe-west4</option>
+        <option value="us">us</option>
+        <option value="eu">eu</option>
       </select>
       <button id="select-project" type="button" disabled>Verify and use project</button>
       <div id="project-info" class="muted"></div>
@@ -55,14 +54,12 @@
     <section class="panel">
       <div class="section-head"><h2>3. CPR routing</h2><span id="routing-state" class="state">Not configured</span></div>
       <p>After selecting a project, the adapter creates its dedicated <strong>Vertex AI</strong> account group. CPR account model discovery calls the OpenAI-style <code>/v1/models</code> endpoint, which Vertex AI does not implement. That account-level query can fail without affecting this plugin's static Gemini model catalog or inference path.</p>
-      <p>The plugin contributes these exact model IDs at registration:</p>
+      <p>The plugin contributes one exact model ID at registration:</p>
       <ul>
-        <li><code>vertex/google/gemini-3.8-flash</code> — GA</li>
-        <li><code>vertex/google/gemini-3.5-flash</code> — GA</li>
-        <li><code>vertex/google/gemini-3.5-flash-lite</code> — GA</li>
-        <li><code>vertex/google/gemini-3.1-pro-preview</code> — Preview</li>
+        <li><code>vertex/google/gemini-4-argon</code> — GA</li>
       </ul>
-      <p>In CPR plugin bindings set Stage <code>upstream</code>, Provider <code>openai</code>, add the four exact model IDs individually, set Account group scope and Client Key scope to empty, and set Failure policy to <code>reject</code>. Do not use a wildcard or put the Vertex AI group on the adapter binding.</p>
+      <p>In CPR plugin bindings set Stage <code>upstream</code>, Provider <code>openai</code>, add only <code>vertex/google/gemini-4-argon</code>, set Account group scope and Client Key scope to empty, and set Failure policy to <code>reject</code>. Do not use a wildcard or put the Vertex AI group on the adapter binding.</p>
+      <p>OpenAI <code>reasoning.effort</code> maps to Gemini 4 thinking levels <code>low</code>, <code>medium</code> and <code>high</code>. The model defaults to <code>MEDIUM</code></p>
       <p id="account-info" class="muted">No Vertex account has been created yet.</p>
       <p>Create a normal CPR Client Key and grant it access to the <strong>Vertex AI</strong> account group. Keep existing Codex account groups and Client Keys unchanged. The plugin does not generate or display client-key secrets.</p>
     </section>
