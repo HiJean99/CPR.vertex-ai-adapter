@@ -1,28 +1,39 @@
-# 设计与验收边界
+# v0.2.0 design notes
 
-## 版本与来源
+## Scope
 
-- 生产宿主 `vm-us` 于 2026-11-04 实测 CPR `v3.38.2`（RPC v7）；插件 SDK 固定取自 `v3.35.0` 对应的提交 `e633557c50456d200c14f8c84e3a6cbd8cbf6cda`，使用相同的 `upstream_adapter v5` 合同。此兼容性推断不替代实际 CPR 安装/运行验收。
-- manifest v2、RPC v7、upstream_adapter v5、model_catalog v2
-- Google Vertex 使用 `:generateContent`，第一期仅 Gemini 文本 JSON 响应
-- ADC 采用 Google 官方 Rust `google-cloud-auth` crate，支持 `external_account` WIF；凭据由运行身份的环境提供，不从 CPR Key 读取
-- 第三方 CLIProxyAPI Vertex ADC 插件仅作为研究参考，未拷贝任何代码（该参考仓库未附授权许可证）
+One Google user account, one Cloud Project, gcloud ADC, Vertex Gemini text Responses API (JSON + SSE). No custom OAuth application, no WIF, no Service Account key import, no multiple Google accounts, no browser automation and no credits scraping in this release.
 
-## 安全与隔离
+## Control plane
 
-- CPR 当前只有 OpenAI / xAI 内置 Provider 可绑定 adapter；本插件挂 OpenAI `api_key` 类型的占位账号
-- `accountId` 必须是专用账号，`model_catalog` 必须使用静态 `account_ids=[accountId]`，杜绝目录扩大
-- 独立 Client Key 仅赋权 Vertex 账号组；原有 Codex Client Key 不做调整
-- 该占位账号必须由管理员手动设置 `model_access=allowlist`，仅包含允许的 `vertex/google/<model>`；否则其他模型可能落入原生 OpenAI 终端，应视为不可启用的隔离缺口
-- 适配器只命中精确 `vertex/google/<model>`；上游路径由白名单中的 `<model>` 构造
-- 覆盖占位账号的 Authorization，但受管 HTTP 仍保留宿主代理、请求计时、已发送水位、账号健康反馈
-- 不将 ADC token 或 Google 凭据写入日志、事件元数据或 CPR 账号凭据
-- 插件是 CPR trustedProcess，不具有 OS 沙箱；只能安装经过审查的源码构建产物
-- 数据面错误不能在已发送操作后自行重试或改换账号
+- CPR Management v2 routes: `api/status`, `api/login/start`, `api/login/complete`, `api/login/cancel`, `api/project/select`, `api/disconnect`.
+- `gcloud auth application-default login --no-launch-browser` runs with a per-plugin `CLOUDSDK_CONFIG` directory. The authorization code is written only to child stdin.
+- The login process and its one-time session ID are held in process memory. Restarting the plugin discards pending login sessions; startup removes stale pending directories.
+- After gcloud writes an `authorized_user` ADC file, the plugin verifies it by calling `gcloud auth application-default print-access-token`, checks Google userinfo, then atomically promotes the pending config directory to the active gcloud directory.
+- Project discovery uses Cloud Resource Manager v1. Project selection checks Service Usage for `aiplatform.googleapis.com` and checks Cloud Billing when permission is available. It never enables APIs or changes Billing.
+- Selected project metadata (project ID, location, email, CPR account ID, billing check result) is stored in `project.json` under the plugin persistent data directory. It contains no token or credential.
 
-## 当前功能和缺口
+## CPR integration
 
-- 已设计：单请求文本输入 → Vertex Gemini generateContent → OpenAI Responses JSON + canonical 用量
-- 缺口：SSE、增量消息、工具、thinking、图像、Claude/Anthropic、动态模型目录、项目赠金和额度
-- Token 成本由 CPR 按模型手动价格覆盖计算，必须单独配置官方单价；不代表 Google Cloud 实际账单
-- 尚无实际 GCP ADC 和 Vertex API 验证，任何编译、协议测试和生产验收都须分别记录，不得互相替代
+- SDK revision pinned to CPR v3.38.2 commit `021134e4681424edf9882abaca83fb9830d1199f`.
+- Release binary is statically linked against musl; CPR package metadata identifies the supported `linux/x86_64` runtime target. This avoids depending on the newer glibc version of the ephemeral build image.
+- Registration idempotently creates a CPR account group with resource key `vertex-ai`.
+- Adapter declaration uses the OpenAI built-in provider, `api_key` authentication kind, base URL `https://aiplatform.googleapis.com/v1/`, `http_sse` transport, empty model/account lists. The binding must restrict it to the `Vertex AI` group and `vertex/google/*` model namespace.
+- After Google project verification, the plugin creates or replaces one OpenAI API-key placeholder account and adds it to the group. The provider credential contains only a dummy key and generic Vertex base URL; the Google ADC remains in the gcloud config directory.
+- The plugin does not create Client Keys. CPR's `ensure_key` resource API does not return a one-time displayable secret, so a user-facing key is created in the native CPR admin UI.
+
+## Inference path
+
+- Read the plugin-owned project selection and verify the selected CPR account marker.
+- Obtain a current ADC access token via gcloud; gcloud handles refresh.
+- Use `HostClient::upstream_http` so CPR owns the account proxy, HTTP lifecycle, timeout, send watermark and observation.
+- Non-stream: `:generateContent` JSON.
+- Stream: `:streamGenerateContent?alt=sse`; parse Vertex SSE incrementally and emit OpenAI Responses SSE frames through a bounded CPR response stream.
+- Token usage maps from `usageMetadata`; CPR performs its own model pricing and metering.
+
+## Known limitations
+
+- Static model catalog (four Gemini IDs); refresh requires a new plugin generation.
+- Only text Responses API. No Chat Completions input, tools, image/audio, native response continuation or Gemini thinking controls.
+- Billing status can be unknown if the user lacks Cloud Billing read permission. Promotional-credit balance and expiry are not available through a supported public inference API.
+- No real Google account or paid Vertex request is included in automated tests. Those require an explicit user login and a selected project.

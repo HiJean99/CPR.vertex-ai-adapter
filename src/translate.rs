@@ -1,16 +1,13 @@
-//! 在 OpenAI Responses 文本请求与 Vertex Gemini JSON 间进行显式、有限的协议转换
+//! OpenAI Responses 文本请求与 Vertex Gemini JSON / SSE 的有限协议转换。
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gateway_plugin_sdk::{
     ErrorCode, PluginFault,
-    call::{
-        model::{
-            CanonicalEvent, ContentKind, ExecutionEvent, FinishReason, Usage, WireEvent,
-            WirePayload,
-        },
-        upstream_adapter::UpstreamAdapterEvent,
+    call::model::{
+        CanonicalEvent, ContentKind, ExecutionEvent, FinishReason, Usage, WireEvent, WirePayload,
     },
+    call::upstream_adapter::UpstreamAdapterEvent,
 };
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -31,11 +28,11 @@ fn text_content(value: &Value) -> Result<String, PluginFault> {
                         "Only text parts are supported by this Vertex AI adapter.",
                     ));
                 }
-                let text = item
-                    .get("text")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| invalid("Text content is missing."))?;
-                result.push_str(text);
+                result.push_str(
+                    item.get("text")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| invalid("Text content is missing."))?,
+                );
             }
             Ok(result)
         }
@@ -45,15 +42,18 @@ fn text_content(value: &Value) -> Result<String, PluginFault> {
     }
 }
 
-pub fn request_to_vertex(input: &[u8]) -> Result<Vec<u8>, PluginFault> {
+/// Returns the Vertex request body and whether the client requested SSE.
+pub fn request_to_vertex(input: &[u8]) -> Result<(Vec<u8>, bool), PluginFault> {
     let root: Value = serde_json::from_slice(input)
         .map_err(|_| invalid("OpenAI Responses request must be JSON."))?;
     let object = root
         .as_object()
         .ok_or_else(|| invalid("OpenAI Responses request must be an object."))?;
-    if object.get("stream").and_then(Value::as_bool) != Some(false) {
-        return Err(invalid("Set stream=false; streaming is not supported yet."));
-    }
+    let streaming = match object.get("stream") {
+        None | Some(Value::Bool(false)) => false,
+        Some(Value::Bool(true)) => true,
+        _ => return Err(invalid("Responses stream must be a boolean.")),
+    };
     if object
         .get("previous_response_id")
         .is_some_and(|value| !value.is_null())
@@ -99,9 +99,7 @@ pub fn request_to_vertex(input: &[u8]) -> Result<Vec<u8>, PluginFault> {
     }
     let mut contents = Vec::new();
     match object.get("input") {
-        Some(Value::String(text)) => {
-            contents.push(json!({"role":"user", "parts":[{"text":text}]}));
-        }
+        Some(Value::String(text)) => contents.push(json!({"role":"user", "parts":[{"text":text}]})),
         Some(Value::Array(messages)) => {
             for message in messages {
                 let msg = message
@@ -124,10 +122,7 @@ pub fn request_to_vertex(input: &[u8]) -> Result<Vec<u8>, PluginFault> {
                 let text = text_content(body)?;
                 match role {
                     "system" | "developer" => system.push(text),
-                    "user" | "assistant" => contents.push(json!({
-                        "role": if role == "assistant" { "model" } else { "user" },
-                        "parts": [{"text": text}]
-                    })),
+                    "user" | "assistant" => contents.push(json!({"role": if role == "assistant" { "model" } else { "user" }, "parts":[{"text":text}]})),
                     _ => return Err(invalid("Message role is unsupported.")),
                 }
             }
@@ -167,7 +162,9 @@ pub fn request_to_vertex(input: &[u8]) -> Result<Vec<u8>, PluginFault> {
     if !options.is_empty() {
         request["generationConfig"] = Value::Object(options);
     }
-    serde_json::to_vec(&request).map_err(|_| invalid("Could not encode Vertex AI request."))
+    let body =
+        serde_json::to_vec(&request).map_err(|_| invalid("Could not encode Vertex AI request."))?;
+    Ok((body, streaming))
 }
 
 pub fn response_to_event(
@@ -192,13 +189,207 @@ pub fn response_to_event(
     if text.is_empty() {
         return Err(invalid("Vertex AI returned no text output."));
     }
-    let generated_id = Uuid::new_v4().simple();
-    let response_id = format!("resp_vertex_{generated_id}");
-    let item_id = format!("msg_vertex_{generated_id}");
-    let created_at = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    let ids = StreamIds::new(public_model);
+    let usage = usage_from_vertex(&root);
+    let reason = finish_reason(candidate.get("finishReason").and_then(Value::as_str));
+    let response = completed_response(&ids, &text, &usage);
+    let wire = WireEvent {
+        protocol: "openai".to_owned(),
+        payload: WirePayload::RawJson {
+            body: serde_json::to_vec(&response)
+                .map_err(|_| invalid("Could not encode Responses output."))?,
+        },
+    };
+    Ok(UpstreamAdapterEvent::new(ExecutionEvent {
+        facts: vec![
+            CanonicalEvent::Started {
+                id: ids.response_id.clone(),
+                model: Some(public_model.to_owned()),
+            },
+            CanonicalEvent::ContentAdded {
+                index: 0,
+                kind: ContentKind::Text,
+            },
+            CanonicalEvent::TextDelta { index: 0, text },
+            CanonicalEvent::Usage { usage },
+            CanonicalEvent::Completed {
+                id: ids.response_id,
+                model: Some(public_model.to_owned()),
+                reason,
+            },
+        ],
+        wire: Some(wire),
+        host: None,
+    }))
+}
+
+#[derive(Debug, Clone)]
+pub struct StreamIds {
+    pub response_id: String,
+    pub item_id: String,
+    pub model: String,
+    pub created_at: u64,
+}
+
+impl StreamIds {
+    pub fn new(model: &str) -> Self {
+        let id = Uuid::new_v4().simple().to_string();
+        Self {
+            response_id: format!("resp_vertex_{id}"),
+            item_id: format!("msg_vertex_{id}"),
+            model: model.to_owned(),
+            created_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct StreamDelta {
+    pub text: String,
+    pub usage: Option<Usage>,
+    pub finish_reason: Option<FinishReason>,
+}
+
+pub fn stream_delta(raw_json: &[u8]) -> Result<StreamDelta, PluginFault> {
+    let root: Value = serde_json::from_slice(raw_json)
+        .map_err(|_| invalid("Vertex AI SSE data was invalid JSON."))?;
+    let candidate = root.pointer("/candidates/0");
+    let text = candidate
+        .and_then(|c| c.pointer("/content/parts"))
+        .and_then(Value::as_array)
+        .map(|parts| {
+            parts
+                .iter()
+                .filter(|part| part.get("thought") != Some(&Value::Bool(true)))
+                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("")
+        })
+        .unwrap_or_default();
+    let usage = root.get("usageMetadata").map(|_| usage_from_vertex(&root));
+    let finish_reason = candidate
+        .and_then(|c| c.get("finishReason"))
+        .and_then(Value::as_str)
+        .map(|reason| finish_reason(Some(reason)));
+    if text.is_empty() && usage.is_none() && finish_reason.is_none() {
+        if root.get("promptFeedback").is_some() {
+            return Err(invalid("Vertex AI blocked this prompt."));
+        }
+        return Err(invalid("Vertex AI SSE event contained no text or usage."));
+    }
+    Ok(StreamDelta {
+        text,
+        usage,
+        finish_reason,
+    })
+}
+
+pub fn stream_start_events(ids: &StreamIds) -> Vec<UpstreamAdapterEvent> {
+    let response = json!({"id":ids.response_id,"object":"response","created_at":ids.created_at,"status":"in_progress","model":ids.model,"output":[]});
+    let item = json!({"id":ids.item_id,"type":"message","role":"assistant","status":"in_progress","content":[]});
+    let part = json!({"type":"output_text","text":"","annotations":[]});
+    vec![
+        stream_wire_event(
+            "response.created",
+            json!({"type":"response.created","sequence_number":0,"response":response}),
+            Some(CanonicalEvent::Started {
+                id: ids.response_id.clone(),
+                model: Some(ids.model.clone()),
+            }),
+        ),
+        stream_wire_event(
+            "response.output_item.added",
+            json!({"type":"response.output_item.added","sequence_number":1,"output_index":0,"item":item}),
+            None,
+        ),
+        stream_wire_event(
+            "response.content_part.added",
+            json!({"type":"response.content_part.added","sequence_number":2,"item_id":ids.item_id,"output_index":0,"content_index":0,"part":part}),
+            Some(CanonicalEvent::ContentAdded {
+                index: 0,
+                kind: ContentKind::Text,
+            }),
+        ),
+    ]
+}
+
+pub fn stream_text_event(ids: &StreamIds, sequence: u64, text: &str) -> UpstreamAdapterEvent {
+    stream_wire_event(
+        "response.output_text.delta",
+        json!({"type":"response.output_text.delta","sequence_number":sequence,"item_id":ids.item_id,"output_index":0,"content_index":0,"delta":text}),
+        Some(CanonicalEvent::TextDelta {
+            index: 0,
+            text: text.to_owned(),
+        }),
+    )
+}
+
+pub fn stream_complete_events(
+    ids: &StreamIds,
+    sequence: u64,
+    full_text: &str,
+    usage: Usage,
+    reason: FinishReason,
+) -> Vec<UpstreamAdapterEvent> {
+    let response = completed_response(ids, full_text, &usage);
+    vec![
+        stream_wire_event(
+            "response.output_text.done",
+            json!({"type":"response.output_text.done","sequence_number":sequence,"item_id":ids.item_id,"output_index":0,"content_index":0,"text":full_text}),
+            None,
+        ),
+        stream_wire_event(
+            "response.content_part.done",
+            json!({"type":"response.content_part.done","sequence_number":sequence+1,"item_id":ids.item_id,"output_index":0,"content_index":0,"part":{"type":"output_text","text":full_text,"annotations":[]}}),
+            None,
+        ),
+        stream_wire_event(
+            "response.output_item.done",
+            json!({"type":"response.output_item.done","sequence_number":sequence+2,"output_index":0,"item":{"id":ids.item_id,"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":full_text,"annotations":[]}]}}),
+            None,
+        ),
+        stream_wire_event(
+            "response.completed",
+            json!({"type":"response.completed","sequence_number":sequence+3,"response":response}),
+            Some(CanonicalEvent::Usage { usage }),
+        ),
+        UpstreamAdapterEvent::new(ExecutionEvent::canonical(CanonicalEvent::Completed {
+            id: ids.response_id.clone(),
+            model: Some(ids.model.clone()),
+            reason,
+        })),
+    ]
+}
+
+fn stream_wire_event(
+    event_name: &str,
+    data: Value,
+    fact: Option<CanonicalEvent>,
+) -> UpstreamAdapterEvent {
+    let serialized = serde_json::to_string(&data).unwrap_or_else(|_| "{}".to_owned());
+    let frame = format!("event: {event_name}\ndata: {serialized}\n\n").into_bytes();
+    let mut event = ExecutionEvent::wire(WireEvent {
+        protocol: "openai".to_owned(),
+        payload: WirePayload::RawSse { frame },
+    });
+    if let Some(fact) = fact {
+        event.facts.push(fact);
+    }
+    UpstreamAdapterEvent::new(event)
+}
+
+fn completed_response(ids: &StreamIds, text: &str, usage: &Usage) -> Value {
+    json!({
+        "id":ids.response_id,"object":"response","created_at":ids.created_at,"status":"completed","model":ids.model,
+        "output":[{"id":ids.item_id,"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":text,"annotations":[]}]}],
+        "usage":{"input_tokens":usage.input_tokens,"output_tokens":usage.output_tokens,"total_tokens":usage.total_tokens}
+    })
+}
+
+pub fn usage_from_vertex(root: &Value) -> Usage {
     let prompt = root
         .pointer("/usageMetadata/promptTokenCount")
         .and_then(Value::as_u64);
@@ -212,67 +403,24 @@ pub fn response_to_event(
         .pointer("/usageMetadata/totalTokenCount")
         .and_then(Value::as_u64)
         .or_else(|| prompt.zip(output).map(|(a, b)| a.saturating_add(b)));
-    let usage = Usage {
+    Usage {
         input_tokens: prompt,
         output_tokens: output,
         cached_tokens: cached,
         total_tokens: total,
         ..Usage::default()
-    };
-    let reason = match candidate.get("finishReason").and_then(Value::as_str) {
+    }
+}
+
+pub fn finish_reason(reason: Option<&str>) -> FinishReason {
+    match reason {
         Some("MAX_TOKENS") => FinishReason::Length,
         Some("SAFETY" | "RECITATION" | "BLOCKLIST" | "PROHIBITED_CONTENT") => {
             FinishReason::ContentFilter
         }
-        _ => FinishReason::Stop,
-    };
-    let response = json!({
-        "id": response_id,
-        "object": "response",
-        "created_at": created_at,
-        "status": "completed",
-        "model": public_model,
-        "output": [{
-            "id": item_id,
-            "type": "message",
-            "role": "assistant",
-            "status": "completed",
-            "content": [{ "type": "output_text", "text": text, "annotations": [] }]
-        }],
-        "usage": {
-            "input_tokens": prompt,
-            "output_tokens": output,
-            "total_tokens": total
-        }
-    });
-    let wire = WireEvent {
-        protocol: "openai".to_owned(),
-        payload: WirePayload::RawJson {
-            body: serde_json::to_vec(&response)
-                .map_err(|_| invalid("Could not encode Responses output."))?,
-        },
-    };
-    Ok(UpstreamAdapterEvent::new(ExecutionEvent {
-        facts: vec![
-            CanonicalEvent::Started {
-                id: response_id.clone(),
-                model: Some(public_model.to_owned()),
-            },
-            CanonicalEvent::ContentAdded {
-                index: 0,
-                kind: ContentKind::Text,
-            },
-            CanonicalEvent::TextDelta { index: 0, text },
-            CanonicalEvent::Usage { usage },
-            CanonicalEvent::Completed {
-                id: response_id,
-                model: Some(public_model.to_owned()),
-                reason,
-            },
-        ],
-        wire: Some(wire),
-        host: None,
-    }))
+        Some("STOP") | None => FinishReason::Stop,
+        _ => FinishReason::Other,
+    }
 }
 
 #[cfg(test)]
@@ -280,17 +428,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn converts_messages_and_instructions() {
-        let input = json!({
-            "model":"vertex/google/gemini-2.5-flash", "stream":false,
-            "instructions":"Be concise", "input":[
-                {"role":"user", "content":[{"type":"input_text","text":"Hello"}]},
-                {"role":"assistant", "content":[{"type":"output_text","text":"Hi"}]}
-            ], "temperature":0.2
-        });
-        let result: Value =
-            serde_json::from_slice(&request_to_vertex(input.to_string().as_bytes()).unwrap())
-                .unwrap();
+    fn converts_openai_responses_and_preserves_stream_flag() {
+        let input = json!({"model":"vertex/google/gemini-2.5-flash","instructions":"Be concise","input":[{"role":"user","content":[{"type":"input_text","text":"Hello"}]},{"role":"assistant","content":[{"type":"output_text","text":"Hi"}]}],"temperature":0.2});
+        let (body, stream) = request_to_vertex(input.to_string().as_bytes()).unwrap();
+        let result: Value = serde_json::from_slice(&body).unwrap();
+        assert!(!stream);
         assert_eq!(result.pointer("/contents/0/parts/0/text").unwrap(), "Hello");
         assert_eq!(result.pointer("/contents/1/role").unwrap(), "model");
         assert_eq!(
@@ -301,26 +443,26 @@ mod tests {
             result.pointer("/generationConfig/temperature").unwrap(),
             0.2
         );
+        let (stream_body, stream) =
+            request_to_vertex(br#"{"input":"Hello","stream":true}"#).unwrap();
+        assert!(stream);
+        assert!(serde_json::from_slice::<Value>(&stream_body).is_ok());
     }
 
     #[test]
-    fn rejects_stream_and_tool_inputs() {
+    fn rejects_tools_continuation_and_non_text() {
         for input in [
-            json!({"input":"Hi","stream":true}),
-            json!({"input":"Hi","stream":false,"tools":[{"type":"function"}]}),
-            json!({"input":"Hi","stream":false,"previous_response_id":"resp_other"}),
-            json!({"input":[{"role":"user","content":[{"type":"input_image"}]}],"stream":false}),
+            json!({"input":"Hi","tools":[{"type":"function"}]}),
+            json!({"input":"Hi","previous_response_id":"resp_other"}),
+            json!({"input":[{"role":"user","content":[{"type":"input_image"}]}]}),
         ] {
             assert!(request_to_vertex(input.to_string().as_bytes()).is_err());
         }
     }
 
     #[test]
-    fn converts_completion_and_usage() {
-        let raw = json!({
-            "candidates":[{"content":{"role":"model","parts":[{"text":"Hello"}]} ,"finishReason":"STOP"}],
-            "usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2,"totalTokenCount":12}
-        });
+    fn converts_non_stream_response_and_usage() {
+        let raw = json!({"candidates":[{"content":{"role":"model","parts":[{"text":"Hello"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2,"totalTokenCount":12}});
         let event = response_to_event(raw.to_string().as_bytes(), "vertex/google/gemini-2.5-flash")
             .unwrap();
         let decoded = UpstreamAdapterEvent::decode(&event.encode().unwrap()).unwrap();
@@ -328,8 +470,20 @@ mod tests {
         assert!(
             matches!(&decoded.event.facts[3], CanonicalEvent::Usage { usage } if usage.input_tokens == Some(10) && usage.output_tokens == Some(2))
         );
+    }
+
+    #[test]
+    fn builds_openai_responses_sse_events() {
+        let ids = StreamIds::new("vertex/google/gemini-2.5-flash");
+        let start = stream_start_events(&ids);
+        assert_eq!(start.len(), 3);
+        let delta = stream_text_event(&ids, 3, "Hello");
+        let decoded = UpstreamAdapterEvent::decode(&delta.encode().unwrap()).unwrap();
         assert!(
-            matches!(&decoded.event.wire.unwrap().payload, WirePayload::RawJson{body} if std::str::from_utf8(body).unwrap().contains("Hello"))
+            matches!(&decoded.event.facts[0], CanonicalEvent::TextDelta { text, .. } if text == "Hello")
+        );
+        assert!(
+            matches!(&decoded.event.wire.unwrap().payload, WirePayload::RawSse { frame } if std::str::from_utf8(frame).unwrap().contains("response.output_text.delta"))
         );
     }
 }

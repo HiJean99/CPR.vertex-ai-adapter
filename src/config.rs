@@ -1,6 +1,6 @@
-//! 插件设置校验与静态上游注册，不读取凭据或宿主数据库
+//! CPR 3.38+ 兼容配置、固定 Gemini 文本模型目录和安全路径校验。
 
-use std::collections::BTreeSet;
+use std::path::PathBuf;
 
 use gateway_plugin_sdk::{
     ErrorCode, PluginFault,
@@ -12,191 +12,256 @@ use gateway_plugin_sdk::{
         },
     },
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 pub const ADAPTER_ID: &str = "mingli42.vertex-ai-adapter.vertex-gemini";
 pub const MODEL_PREFIX: &str = "vertex/google/";
+pub const ACCOUNT_MARKER: &str = "mingli42.vertex-ai-adapter";
+pub const GROUP_RESOURCE_KEY: &str = "vertex-ai";
+pub const GROUP_NAME: &str = "Vertex AI";
+
+/// CPR 在发布时冻结模型目录，因此第一版使用经过公开上游实现交叉核对的
+/// Gemini 文本模型 allowlist；不把未经发现的模型虚构成可用模型。
+pub const GEMINI_MODELS: &[(&str, &str)] = &[
+    ("gemini-3.8-flash", "Gemini 3.8 Flash"),
+    ("gemini-3.1-pro-preview", "Gemini 3.1 Pro Preview"),
+    ("gemini-2.5-flash", "Gemini 2.5 Flash"),
+    ("gemini-2.5-pro", "Gemini 2.5 Pro"),
+];
 
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Config {
-    pub project_id: String,
-    #[serde(default)]
-    pub quota_project_id: String,
-    #[serde(default = "default_location")]
-    pub location: String,
-    pub account_id: String,
-    pub models: Vec<String>,
+    #[serde(default = "default_gcloud_path")]
+    pub gcloud_path: String,
+    #[serde(default = "default_data_dir")]
+    pub data_dir: String,
 }
 
-fn default_location() -> String {
-    "global".to_owned()
+fn default_gcloud_path() -> String {
+    "/app/.runtime/data/cpr-vertex-ai-adapter/google-cloud-sdk/bin/gcloud".to_owned()
+}
+
+fn default_data_dir() -> String {
+    "/app/.runtime/data/cpr-vertex-ai-adapter".to_owned()
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            gcloud_path: default_gcloud_path(),
+            data_dir: default_data_dir(),
+        }
+    }
 }
 
 impl Config {
     pub fn validate(&self) -> Result<(), PluginFault> {
-        let valid_project = |input: &str| {
-            (6..=63).contains(&input.len())
-                && input.starts_with(|c: char| c.is_ascii_lowercase())
-                && input.ends_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
-                && input
-                    .bytes()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
-        };
-        let valid_location = |input: &str| {
-            (2..=64).contains(&input.len())
-                && input
-                    .bytes()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
-                && !input.starts_with('-')
-                && !input.ends_with('-')
-        };
-        let valid_model = |input: &str| {
-            (3..=128).contains(&input.len())
-                && input.bytes().all(|c| {
-                    c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, b'-' | b'.')
-                })
-                && !input.starts_with('.')
-                && !input.ends_with('.')
-        };
-        if !valid_project(&self.project_id)
-            || (!self.quota_project_id.is_empty() && !valid_project(&self.quota_project_id))
-            || !valid_location(&self.location)
-            || self.account_id.is_empty()
-            || self.account_id.len() > 128
-            || !self
-                .account_id
-                .bytes()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-'))
-            || self.models.is_empty()
-            || self.models.len() > 32
-            || self.models.iter().any(|model| !valid_model(model))
-            || self.models.iter().collect::<BTreeSet<_>>().len() != self.models.len()
+        let data_dir = PathBuf::from(&self.data_dir);
+        if self.gcloud_path.is_empty()
+            || self.gcloud_path.len() > 512
+            || self.gcloud_path.chars().any(char::is_control)
+            || !data_dir.is_absolute()
+            || self.data_dir.len() > 1024
+            || self.data_dir.chars().any(char::is_control)
+            || data_dir.components().any(|part| {
+                matches!(
+                    part,
+                    std::path::Component::ParentDir | std::path::Component::CurDir
+                )
+            })
         {
             return Err(PluginFault::new(
                 ErrorCode::InvalidInput,
-                "Invalid Vertex AI adapter configuration.",
+                "Invalid Vertex AI adapter runtime configuration.",
             ));
         }
         Ok(())
     }
 
-    pub fn public_model(&self, model: &str) -> String {
+    pub fn data_dir(&self) -> PathBuf {
+        PathBuf::from(&self.data_dir)
+    }
+    pub fn home_dir(&self) -> PathBuf {
+        self.data_dir().join("home")
+    }
+    pub fn gcloud_config_dir(&self) -> PathBuf {
+        self.data_dir().join("gcloud")
+    }
+    pub fn pending_root(&self) -> PathBuf {
+        self.data_dir().join("pending")
+    }
+    pub fn pending_dir(&self, session_id: &str) -> PathBuf {
+        self.pending_root().join(session_id)
+    }
+    pub fn adc_file(&self) -> PathBuf {
+        self.gcloud_config_dir()
+            .join("application_default_credentials.json")
+    }
+    pub fn project_file(&self) -> PathBuf {
+        self.data_dir().join("project.json")
+    }
+
+    pub fn project_base_url() -> &'static str {
+        "https://aiplatform.googleapis.com/v1/"
+    }
+
+    pub fn project_path(
+        project_id: &str,
+        location: &str,
+        model: &str,
+        streaming: bool,
+    ) -> Result<String, PluginFault> {
+        if !valid_project_id(project_id)
+            || !valid_location(location)
+            || Self::upstream_model(&Self::public_model(model)).is_none()
+        {
+            return Err(PluginFault::new(
+                ErrorCode::InvalidInput,
+                "Invalid Vertex project, location, or model.",
+            ));
+        }
+        let action = if streaming {
+            "streamGenerateContent"
+        } else {
+            "generateContent"
+        };
+        Ok(format!(
+            "projects/{project_id}/locations/{location}/publishers/google/models/{model}:{action}"
+        ))
+    }
+
+    pub fn public_model(model: &str) -> String {
         format!("{MODEL_PREFIX}{model}")
     }
 
-    pub fn upstream_model<'a>(&self, public_model: &'a str) -> Option<&'a str> {
+    pub fn upstream_model(public_model: &str) -> Option<&str> {
         let model = public_model.strip_prefix(MODEL_PREFIX)?;
-        self.models
+        GEMINI_MODELS
             .iter()
-            .any(|known| known == model)
+            .any(|(known, _)| *known == model)
             .then_some(model)
     }
 
-    pub fn quota_project(&self) -> &str {
-        if self.quota_project_id.is_empty() {
-            &self.project_id
-        } else {
-            &self.quota_project_id
-        }
-    }
-
-    pub fn base_url(&self) -> String {
-        let host = if self.location == "global" {
-            "aiplatform.googleapis.com".to_owned()
-        } else {
-            format!("{}-aiplatform.googleapis.com", self.location)
-        };
-        format!(
-            "https://{host}/v1/projects/{}/locations/{}/publishers/google/models/",
-            self.project_id, self.location
-        )
-    }
-
-    pub fn adapter_registration(&self) -> UpstreamAdapterRegistration {
+    pub fn adapter_registration() -> UpstreamAdapterRegistration {
         UpstreamAdapterRegistration {
             adapters: vec![UpstreamAdapterDeclaration {
                 id: ADAPTER_ID.to_owned(),
                 provider: BuiltinProvider::OpenAi,
-                base_url: self.base_url(),
+                base_url: Self::project_base_url().to_owned(),
                 paths: vec![],
                 authentication_kinds: vec!["api_key".to_owned()],
-                transport: UpstreamTransport::HttpJson,
+                transport: UpstreamTransport::HttpSse,
                 protocol: "openai".to_owned(),
-                models: self
-                    .models
-                    .iter()
-                    .map(|model| self.public_model(model))
-                    .collect(),
-                account_ids: vec![self.account_id.clone()],
+                // The CPR binding scopes provider, Vertex group and model namespace.
+                models: vec![],
+                account_ids: vec![],
             }],
         }
     }
 
-    pub fn catalog_registration(&self) -> ModelCatalogRegistrationV2 {
+    pub fn catalog_registration() -> ModelCatalogRegistrationV2 {
         ModelCatalogRegistrationV2 {
             aliases: vec![],
-            models: self
-                .models
-                .iter()
-                .map(|model| AdaptedModel {
-                    id: self.public_model(model),
-                    adapter_id: ADAPTER_ID.to_owned(),
-                    features: vec![],
-                    max_output_tokens: None,
-                    presentation: ModelPresentation {
-                        display_name: Some(format!("Vertex AI Gemini · {model}")),
-                        description: Some("Text-only Gemini via Google Vertex AI".to_owned()),
-                        ..ModelPresentation::default()
-                    },
-                })
-                .collect(),
+            models: GEMINI_MODELS.iter().map(|(model, display_name)| AdaptedModel {
+                id: Self::public_model(model),
+                adapter_id: ADAPTER_ID.to_owned(),
+                features: vec![],
+                max_output_tokens: Some(65_536),
+                presentation: ModelPresentation {
+                    display_name: Some((*display_name).to_owned()),
+                    description: Some("Gemini text generation via Google Vertex AI. Availability depends on the selected project and location.".to_owned()),
+                    context_window_tokens: Some(1_048_576),
+                    max_context_window_tokens: Some(1_048_576),
+                    ..ModelPresentation::default()
+                },
+            }).collect(),
         }
     }
+}
+
+pub fn valid_project_id(input: &str) -> bool {
+    (6..=30).contains(&input.len())
+        && input.starts_with(|c: char| c.is_ascii_lowercase())
+        && input.ends_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && input
+            .bytes()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+}
+
+pub fn valid_location(input: &str) -> bool {
+    (2..=64).contains(&input.len())
+        && input
+            .bytes()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+        && !input.starts_with('-')
+        && !input.ends_with('-')
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProjectSelection {
+    pub project_id: String,
+    pub location: String,
+    pub email: String,
+    pub account_id: String,
+    pub billing_enabled: Option<bool>,
+    pub billing_account: Option<String>,
+    pub selected_at_ms: i64,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn sample() -> Config {
-        Config {
-            project_id: "example-project-123".into(),
-            quota_project_id: String::new(),
-            location: "global".into(),
-            account_id: "acct_example".into(),
-            models: vec!["gemini-2.5-flash".into()],
-        }
+    #[test]
+    fn project_path_is_validated_and_uses_vertex_publisher_path() {
+        assert_eq!(
+            Config::project_path("example-project-123", "global", "gemini-2.5-flash", false)
+                .unwrap(),
+            "projects/example-project-123/locations/global/publishers/google/models/gemini-2.5-flash:generateContent"
+        );
+        assert!(
+            Config::project_path("../evil-project", "global", "gemini-2.5-flash", false).is_err()
+        );
+        assert!(
+            Config::project_path(
+                "example-project-123",
+                "global.example.com",
+                "gemini-2.5-flash",
+                false
+            )
+            .is_err()
+        );
+        assert!(
+            Config::project_path("example-project-123", "global", "gemini-unknown", false).is_err()
+        );
     }
 
     #[test]
-    fn register_explicit_account_and_model_only() {
-        let config = sample();
-        config.validate().unwrap();
-        let adapter = config.adapter_registration().adapters.pop().unwrap();
-        assert_eq!(adapter.account_ids, ["acct_example"]);
-        assert_eq!(adapter.models, ["vertex/google/gemini-2.5-flash"]);
-        assert_eq!(
-            adapter.base_url,
-            "https://aiplatform.googleapis.com/v1/projects/example-project-123/locations/global/publishers/google/models/"
+    fn registration_inherits_narrow_binding_and_exposes_only_supported_models() {
+        let adapter = Config::adapter_registration().adapters.pop().unwrap();
+        assert!(adapter.models.is_empty());
+        assert!(adapter.account_ids.is_empty());
+        assert_eq!(adapter.authentication_kinds, ["api_key"]);
+        assert_eq!(adapter.transport, UpstreamTransport::HttpSse);
+        let catalog = Config::catalog_registration();
+        assert_eq!(catalog.models.len(), GEMINI_MODELS.len());
+        assert!(
+            catalog
+                .models
+                .iter()
+                .all(|m| m.id.starts_with(MODEL_PREFIX))
         );
-        assert_eq!(
-            config.upstream_model("vertex/google/gemini-2.5-flash"),
-            Some("gemini-2.5-flash")
-        );
-        assert_eq!(config.upstream_model("gpt-6.1-terra"), None);
     }
 
     #[test]
-    fn reject_url_segments_and_duplicate_models() {
-        let mut config = sample();
-        config.location = "global.example.com".into();
+    fn data_directory_rejects_relative_and_parent_paths() {
+        let mut config = Config::default();
+        assert!(config.validate().is_ok());
+        config.data_dir = "relative/path".into();
         assert!(config.validate().is_err());
-        config.location = "us-central1".into();
-        config.models.push("gemini-2.5-flash".into());
-        assert!(config.validate().is_err());
-        config.models.pop();
-        config.models[0] = "../danger".into();
+        config.data_dir = "/app/data/../secret".into();
         assert!(config.validate().is_err());
     }
 }

@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Vertex AI</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <main>
+    <section class="panel">
+      <div class="eyebrow">GOOGLE CLOUD</div>
+      <h1>Vertex AI</h1>
+      <p class="lead">Connect one Google account and route Gemini requests through your existing CPR gateway.</p>
+      <div id="notice" class="notice" role="status" aria-live="polite">Checking plugin status…</div>
+    </section>
+
+    <section class="panel">
+      <div class="section-head"><h2>1. Google account</h2><span id="account-state" class="state">Not connected</span></div>
+      <p id="gcloud-note" class="muted"></p>
+      <button id="connect" type="button">Connect Google account</button>
+      <div id="login" class="login hidden">
+        <p>Open this Google authorization link in your browser. Sign in, approve access, then paste the one-time code below.</p>
+        <a id="auth-link" href="#" target="_blank" rel="noopener noreferrer">Open Google authorization</a>
+        <label for="code">Authorization code</label>
+        <input id="code" type="password" autocomplete="off" spellcheck="false" placeholder="Paste the code from Google">
+        <div class="actions">
+          <button id="complete" type="button">Complete sign-in</button>
+          <button id="cancel" type="button" class="secondary">Cancel</button>
+        </div>
+        <p class="hint">The code is sent directly to gcloud stdin. It is not saved in browser storage or plugin state.</p>
+      </div>
+      <div id="identity" class="identity hidden"></div>
+    </section>
+
+    <section class="panel" id="project-panel">
+      <div class="section-head"><h2>2. Google Cloud project</h2><span id="project-state" class="state">Not selected</span></div>
+      <p class="muted">Choose the project that owns your Google Cloud billing and promotional credits. Vertex AI API must already be enabled.</p>
+      <label for="project">Project</label>
+      <select id="project" disabled><option value="">Connect Google first</option></select>
+      <label for="location">Vertex AI location</label>
+      <select id="location">
+        <option value="global">global</option>
+        <option value="us-central1">us-central1</option>
+        <option value="us-east5">us-east5</option>
+        <option value="europe-west4">europe-west4</option>
+      </select>
+      <button id="select-project" type="button" disabled>Verify and use project</button>
+      <div id="project-info" class="muted"></div>
+    </section>
+
+    <section class="panel">
+      <div class="section-head"><h2>3. CPR routing</h2><span id="routing-state" class="state">Not configured</span></div>
+      <p>After selecting a project, the adapter creates its dedicated <strong>Vertex AI</strong> account group. In CPR plugin bindings, bind this adapter to Provider <code>openai</code>, this group, and model namespace <code>vertex/google/*</code>. Keep the existing Codex account group and Client Keys unchanged.</p>
+      <p id="account-info" class="muted">No Vertex account has been created yet.</p>
+      <p>Create a normal CPR Client Key and grant it access to the Vertex AI group. The plugin does not generate or display client-key secrets.</p>
+    </section>
+
+    <section class="panel credits">
+      <h2>Google Cloud credits</h2>
+      <p>Google does not expose promotional-credit balances through the Vertex API. Check the balance and expiry in Google Cloud Billing.</p>
+      <a id="billing-link" href="https://console.cloud.google.com/billing" target="_blank" rel="noopener noreferrer">Open Cloud Billing</a>
+    </section>
+
+    <section class="panel danger-zone">
+      <h2>Disconnect</h2>
+      <p class="muted">Disconnect removes this plugin's ADC directory and removes its account from the Vertex AI group. It does not delete your Google Cloud project or billing account.</p>
+      <button id="disconnect" type="button" class="danger" disabled>Disconnect Google account</button>
+    </section>
+    <footer>CPR.vertex-ai-adapter · gcloud ADC · one Google account / one project</footer>
+  </main>
+  <script src="app.js" defer></script>
+</body>
+</html>

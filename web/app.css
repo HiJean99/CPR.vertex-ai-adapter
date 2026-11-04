@@ -1,0 +1,46 @@
+:root { color-scheme: light dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--background, #f4f6f8); color: var(--foreground, #18212b); font-size: 14px; line-height: 1.55; }
+main { max-width: 780px; margin: 0 auto; padding: 22px 18px 38px; }
+.panel { background: var(--card, #fff); border: 1px solid var(--border, #dce2e8); border-radius: 12px; padding: 20px; margin: 0 0 14px; }
+.eyebrow { color: var(--muted, #657180); font-size: 11px; font-weight: 700; letter-spacing: .12em; }
+h1 { font-size: 26px; line-height: 1.2; margin: 5px 0 7px; }
+h2 { font-size: 16px; margin: 0 0 10px; }
+p { margin: 8px 0 12px; }
+.lead { color: var(--muted, #657180); margin-bottom: 2px; }
+.section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.section-head h2 { margin: 0; }
+.state { border-radius: 999px; padding: 3px 9px; font-size: 11px; background: var(--surface, #edf1f5); color: var(--muted, #596675); white-space: nowrap; }
+.state.good { color: #187448; background: #e4f4eb; }
+.state.bad { color: #a23a32; background: #fbe9e7; }
+.notice { margin-top: 15px; border-radius: 8px; padding: 10px 12px; background: var(--surface, #edf1f5); color: var(--muted, #596675); }
+.notice.error { color: #a23a32; background: #fbe9e7; }
+.notice.success { color: #187448; background: #e4f4eb; }
+.muted, .hint { color: var(--muted, #657180); }
+.hint { font-size: 12px; }
+label { display: block; margin: 12px 0 5px; font-weight: 600; }
+input, select { width: 100%; min-height: 40px; padding: 8px 10px; border-radius: 7px; border: 1px solid var(--border, #cbd3dc); background: var(--input, #fff); color: inherit; font: inherit; }
+button { min-height: 38px; border: 0; border-radius: 7px; padding: 8px 14px; margin-top: 12px; background: var(--accent, #245fba); color: #fff; font: inherit; font-weight: 650; cursor: pointer; }
+button:disabled { opacity: .45; cursor: not-allowed; }
+button.secondary { background: var(--surface, #edf1f5); color: inherit; border: 1px solid var(--border, #dce2e8); }
+button.danger { background: #a23a32; }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.actions button { margin-top: 10px; }
+.login { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border, #dce2e8); }
+a { color: var(--link, #245fba); overflow-wrap: anywhere; }
+.identity { margin-top: 12px; font-weight: 600; }
+.hidden { display: none !important; }
+code { font-size: 12px; background: var(--surface, #edf1f5); padding: 2px 5px; border-radius: 4px; }
+.credits { border-style: dashed; }
+footer { text-align: center; color: var(--muted, #657180); font-size: 11px; padding: 12px; }
+@media (prefers-color-scheme: dark) {
+  body { background: var(--background, #10151c); color: var(--foreground, #e5eaf0); }
+  .panel { background: var(--card, #171e27); border-color: var(--border, #303b49); }
+  .state { background: #26313e; }
+  .state.good { background: #173c2d; color: #91d7b2; }
+  .state.bad, .notice.error { background: #482521; color: #ffb6ad; }
+  .notice.success { background: #173c2d; color: #91d7b2; }
+  input, select { background: #111821; border-color: #3a4655; }
+  button.secondary { background: #26313e; border-color: #3a4655; }
+  code { background: #26313e; }
+}

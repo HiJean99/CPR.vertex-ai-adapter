@@ -1,56 +1,88 @@
-# CPR Vertex AI Adapter (v0.1.1)
+# CPR Vertex AI Adapter v0.2.0
 
-独立 Rust 插件，通过 CPR 官方 `upstream_adapter v5` + `model_catalog v2` 挂载 Vertex AI Gemini，不修改 CPR 核心。
+A CPR 3.38.2+ plugin that connects one Google account through the official Google Cloud CLI (gcloud) ADC flow and routes Gemini text requests to Google Vertex AI.
 
-## 当前范围
+## What it does
 
-- 第一期：Vertex AI `publishers/google` Gemini **文本、非流式** `POST :generateContent`，OpenAI Responses 协议输入输出
-- 采用 Google 官方 Rust `google-cloud-auth` ADC：支持 Service Account、`gcloud auth application-default login` 及 Workload Identity Federation（WIF）配置，不导入真实 Google 凭据到 CPR
-- Token 通过 `Authorization: Bearer` 只发送到受控的 Google Vertex AI HTTPS 上游，使用 `x-goog-user-project` 归集配额
-- SDK 负责绑定、Key 作用域、账号选择、代理、发送状态、错误观测与结算，插件不直接访问 CPR 数据库
-- 目前不支持工具调用、图片、音频、原生续接、WebSocket、流式 SSE、Claude、模型自动发现或 Google 余额查询
-- 本仓库是开发工作区；没有接入生产系统，安装启用必须另行批准
+- CPR-native Management v2 page: start Google sign-in, display the authorization URL, accept the one-time code, list projects, verify Vertex AI API / Billing, select one project, and disconnect.
+- Uses `gcloud auth application-default login --no-launch-browser`; gcloud owns the OAuth exchange, refresh token and access-token refresh. No custom OAuth client, Client Secret, service-account JSON or hand-written token refresh.
+- One Google account and one selected project per plugin instance.
+- ADC and gcloud config live under the persistent CPR data directory, separate from the Codex accounts and keys.
+- Automatically creates a dedicated CPR account group named `Vertex AI` and a managed OpenAI API-key placeholder account after a project is verified.
+- Gemini text Responses API, both non-streaming JSON and streaming SSE.
+- Uses CPR managed upstream HTTP, account scheduling, usage metering, and the selected account's outbound proxy.
 
-## 生产隔离要求
+## Runtime dependency
 
-1. 在 CPR 管理端**预先创建**一个仅用于 Vertex AI 的 OpenAI API Key 占位账号；它只能作为适配器账号，不应加入现有 Codex 分组；**必须在账号模型政策中设置 allowlist，仅允许 `vertex/google/<model>` 精确模型 ID**
-2. 单独建立 Vertex AI 分组与专用 Client Key，只绑定这个分组，勿将 Vertex 账号加入现有 Codex Key 可见分组
-3. 占位 Key 不用于真实认证，插件通过 ADC 替换其 `Authorization` 头；不要复用任何有效 OpenAI Key
-4. 将该账号的 `accountId` 与 Vertex 项目 ID、location、显式 Gemini 模型列表配置到插件
-5. 为该插件添加唯一 upstream 绑定，限制 `provider=openai`、模型 `vertex/google/*`，故障策略 `reject`；安装时严格核对 Key、账号组与绑定的交集
-6. 首次安装仅测试 `/v1/responses` 的 `stream:false` 文本请求；不能拿 Codex CLI 作为当前版本的验收依据
+The plugin package does not embed the 94.6 MB Google Cloud CLI archive. Install the official x86_64 Linux archive (which includes bundled Python) into the CPR persistent data directory:
 
-> 插件 SDK 的 `model_catalog v2` 要求注册时就有静态账号 ID，因此此版不能在启用后异步创建账号而直接发布完整模型目录。先使用显式 `accountId`；以后再设计安全的一次性 bootstrap 与重新发布流程。
+`/app/.runtime/data/cpr-vertex-ai-adapter/google-cloud-sdk/`
 
-## ADC 部署前提
+The expected executable is:
 
-在外部 VPS 上优先使用已配置身份提供方的 Workload Identity Federation，具体 `GOOGLE_APPLICATION_CREDENTIALS` 指向由管理员安全保管的 external-account 配置文件；该文件本身不包含服务账号私钥。WIF 仍需要可用的外部身份源，**不能仅靠插件自动获得 Google Cloud 身份**。不支持 WIF 时应暂停生产启用，不应擅自降级到长期 Service Account 私钥。
+`/app/.runtime/data/cpr-vertex-ai-adapter/google-cloud-sdk/bin/gcloud`
 
-## 配置示例（无凭据）
+The 2026-11-03 Google Cloud CLI 592.0.0 archive is documented at <https://docs.cloud.google.com/sdk/docs/install-sdk?hl=en>. Its published SHA-256 is `16fda6058d66e4ec29e8575e2b6e19b0d03cea7b091e6730f7e8361209e6955f`.
 
-```json
-{
-  "projectId": "example-project-123",
-  "quotaProjectId": "example-project-123",
-  "location": "global",
-  "accountId": "acct_example",
-  "models": ["gemini-2.5-flash"]
-}
-```
+## Connect flow
 
-公开模型 ID：`vertex/google/gemini-2.5-flash`。Google API 模型 ID：`gemini-2.5-flash`。
+1. Open the Vertex AI page in CPR plugin management.
+2. Click **Connect Google account**.
+3. Open the Google authorization URL in a browser, sign in and approve.
+4. Paste the one-time authorization code back into CPR.
+5. Select the Cloud Project that owns the billing account / promotional credits.
+6. The plugin checks `aiplatform.googleapis.com` and the project's billing status. It does not enable APIs or change billing automatically.
+7. The plugin creates the dedicated Vertex account and adds it to the `Vertex AI` account group.
 
-## 本地验证
+The code is sent to the gcloud subprocess stdin and is not stored in plugin state, browser storage or logs. gcloud writes ADC to a private directory (directory mode 0700, ADC file mode 0600). Disconnect removes that plugin-owned ADC directory and removes the managed account from the Vertex group; it does not delete the Google Cloud project or billing account.
 
-使用 Rust 1.99.1（安装在隔离开发环境中，不要求系统级安装）：
+## CPR routing setup
+
+The plugin creates the `Vertex AI` account group during registration. In the CPR upstream-adapter binding, bind:
+
+- Provider: `openai`
+- Account group: `Vertex AI`
+- Models: `vertex/google/*`
+- Failure policy: `reject`
+
+Do not bind the Vertex group to existing Codex Client Keys. Create a normal CPR Client Key and grant it access to the Vertex AI group. The plugin deliberately does not generate a Client Key secret because the resource-management API does not return a one-time displayable secret.
+
+## Model catalog and supported request scope
+
+The CPR model catalog is static at plugin registration. v0.2.0 exposes:
+
+- `vertex/google/gemini-3.8-flash`
+- `vertex/google/gemini-3.1-pro-preview`
+- `vertex/google/gemini-2.5-flash`
+- `vertex/google/gemini-2.5-pro`
+
+Supported request protocol: OpenAI Responses text input/output. Both `stream:false` and `stream:true` are supported. The adapter currently rejects tools, images, audio, native `previous_response_id` continuation and unsupported reasoning options. Model availability still depends on the selected project's Vertex AI permissions, location and model access.
+
+## Billing and promotional credits
+
+The plugin checks whether Billing is linked, when the Cloud Billing API permission is available. Google does not expose promotional-credit balance and expiry through the Vertex inference API; the management page links to Google Cloud Billing. It does not scrape the console or invent a balance.
+
+## Isolation and security
+
+- The adapter's declaration leaves account and model sets empty so CPR's configured binding is the authority. Restrict that binding to the dedicated Vertex group and `vertex/google/*` namespace.
+- The managed placeholder API key is not a Google credential. At inference time the adapter replaces upstream Authorization with a short-lived token obtained by `gcloud auth application-default print-access-token`.
+- No Google token or refresh token is stored in CPR account facts or returned to the browser.
+- The existing Codex OAuth accounts, Codex Client Keys and Codex provider binding are not modified.
+- The plugin is a CPR `trustedProcess`; it is not an OS sandbox. Only install a reviewed build from this repository.
+
+## Build and test
+
+Rust 1.99.1, SDK pinned to CPR v3.38.2 (`021134e4681424edf9882abaca83fb9830d1199f`). The release executable is statically linked with musl so it runs on the CPR Debian 12 container (glibc 2.36) even when the build workspace has a newer glibc:
 
 ```bash
 cargo fmt -- --check
 cargo clippy --all-targets --all-features --locked -- -D warnings
 cargo test --locked
-cargo build --release --locked
+rustup target add x86_64-unknown-linux-musl
+apt-get install -y musl-tools
+CC_x86_64_unknown_linux_musl=musl-gcc \
+CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc \
+cargo build --release --locked --target x86_64-unknown-linux-musl
 ```
 
-`cpr-plugin package` 需要使用兼容 v3.35.0+ 的官方 CLI，包必须构建在最终运行宿主的 OS/架构上。UK 是 ARM64，vm-us 目标通常为 x86_64 Linux；**不能直接把 ARM64 二进制改标签当作生产包**。
-
-参阅 `docs/design.md` 的账号隔离和阶段边界。
+Package the static Linux x86_64 executable with the CPR 3.38.2 `cpr-plugin package` CLI using its supported `x86_64-unknown-linux-gnu` platform label. CPR's package manifest records the OS and architecture; the executable itself is static musl. The target host is Debian 12 / x86_64.

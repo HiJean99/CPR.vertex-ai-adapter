@@ -1,8 +1,11 @@
-//! CPR 官方插件进程入口，注册仅限 Vertex AI 文本适配器
+//! CPR 插件进程入口：Google gcloud ADC + Vertex Gemini adapter + 管理页面。
 
+mod accounts;
 mod auth;
 mod config;
 mod execute;
+mod google;
+mod management;
 mod translate;
 
 use config::Config;
@@ -27,17 +30,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let config: Config = serde_json::from_value(session.handshake().configuration.clone())?;
     config.validate().map_err(|_| SessionError::Handshake)?;
-    let adapter_registration = config.adapter_registration();
-    let catalog_registration = config.catalog_registration();
+    auth::cleanup_stale_pending(&config)
+        .await
+        .map_err(|error| std::io::Error::other(error.message))?;
+    let login = auth::shared_login();
+    let management_config = config.clone();
+    let management_login = login.clone();
+
     let plugin = PluginBuilder::from_json(include_bytes!("../plugin.json"))?
-        .on(methods::UPSTREAM_ADAPTER_REGISTER, move |_| {
-            let registration = adapter_registration.clone();
-            async move { Ok(TypedReply::new(registration)) }
+        .on(methods::UPSTREAM_ADAPTER_REGISTER, move |call| {
+            async move {
+                // Create the plugin-owned group during registration so the
+                // administrator can bind the adapter without hand-creating it.
+                let _ = accounts::ensure_group(&call.host).await?;
+                Ok(TypedReply::new(Config::adapter_registration()))
+            }
         })?
-        .model_catalog(catalog_registration)?
+        .model_catalog(Config::catalog_registration())?
         .on(methods::UPSTREAM_ADAPTER_EXECUTE, move |call| {
             let config = config.clone();
             async move { execute::run(&config, call).await }
+        })?
+        .management(management::registration(), move |call| {
+            let config = management_config.clone();
+            let login = management_login.clone();
+            async move { management::handle(&config, &login, call).await }
         })?
         .build()?;
     session.run(plugin).await?;
@@ -49,9 +66,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn author_manifest_matches_plugin_identity_and_contract() {
+    fn manifest_identity_and_management_resources_are_consistent() {
         let manifest = Manifest::from_author_slice(include_bytes!("../plugin.json")).unwrap();
         assert_eq!(manifest.plugin_id().unwrap(), "mingli42.vertex-ai-adapter");
-        assert_eq!(manifest.contributes.len(), 2);
+        assert_eq!(manifest.contributes.len(), 3);
+        let registration = management::registration();
+        assert_eq!(registration.pages.len(), 1);
+        assert!(
+            registration
+                .resources
+                .iter()
+                .all(|resource| manifest.resources.contains_key(&resource.path))
+        );
     }
 }
