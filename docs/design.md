@@ -1,4 +1,4 @@
-# v0.2.5 design notes
+# v0.2.6 design notes
 
 ## Scope
 
@@ -23,7 +23,7 @@ One Google user account, one Cloud Project, gcloud ADC, Vertex Gemini text Respo
 - The management page idempotently creates a CPR account group with resource key `vertex-ai`; after project verification, it adds the managed account to that group.
 - Adapter declaration uses the OpenAI built-in provider, `api_key` authentication kind, base URL `https://aiplatform.googleapis.com/v1/`, `http_sse` transport, empty adapter model list and exactly one managed account ID. The upstream binding uses Provider `openai`, the four exact public Gemini model IDs (`gemini-3.8-flash`, `gemini-3.5-flash`, `gemini-3.5-flash-lite`, `gemini-3.1-pro-preview`), no account-group or Client-Key scope, and failure policy `reject`. CPR requires the static account ID to associate contributed models with the adapter; request access is instead restricted by the native Vertex AI account group assigned to each Client Key.
 - The model catalog is contributed statically at registration. CPR account-level OpenAI model discovery (`GET /v1/models`) is not a Vertex AI inference API and may fail independently; Gemini inference uses the project/location-specific `generateContent` and `streamGenerateContent` endpoints.
-- Gemini 2.5 Flash and Gemini 2.5 Pro reached their Vertex AI retirement date on 2026-10-20 and are not included in v0.2.5.
+- Gemini 2.5 Flash and Gemini 2.5 Pro reached their Vertex AI retirement date on 2026-10-20 and are not included in v0.2.6.
 - The placeholder account is created before the static adapter declaration and its ID is returned in `account_ids`. After Google project verification, the plugin replaces its metadata and adds it to the group. The provider credential contains only a dummy key and generic Vertex base URL; the Google ADC remains in the gcloud config directory.
 - The plugin does not create Client Keys. CPR's `ensure_key` resource API does not return a one-time displayable secret, so a user-facing key is created in the native CPR admin UI.
 
@@ -33,7 +33,7 @@ One Google user account, one Cloud Project, gcloud ADC, Vertex Gemini text Respo
 - Obtain a current ADC access token via gcloud; gcloud handles refresh.
 - Use `HostClient::upstream_http` so CPR owns the account proxy, HTTP lifecycle, timeout, send watermark and observation.
 - The adapter registers `http_sse` as its transport; every `ResponseObservation.transport` uses that same value for both JSON and SSE responses.
-- Non-stream: `:generateContent` JSON.
+- Non-stream: `:generateContent` JSON; wrap the completed response in a typed `response.completed` `WirePayload::Json` event with the full response under `response`, allowing CPR `collect_response` to identify the terminal object.
 - Stream: `:streamGenerateContent?alt=sse`; parse Vertex SSE incrementally and emit OpenAI Responses SSE frames through a bounded CPR response stream.
 - Token usage maps from `usageMetadata`; CPR performs its own model pricing and metering.
 

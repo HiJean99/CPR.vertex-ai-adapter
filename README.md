@@ -1,4 +1,4 @@
-# CPR Vertex AI Adapter v0.2.5
+# CPR Vertex AI Adapter v0.2.6
 
 A CPR 3.38.2+ plugin that connects one Google account through the official Google Cloud CLI (gcloud) ADC flow and routes Gemini text requests to Google Vertex AI.
 
@@ -57,7 +57,7 @@ The adapter binding must not use an account-group or Client-Key scope: CPR's sta
 
 ## Model catalog and supported request scope
 
-The CPR model catalog is static at plugin registration. v0.2.5 exposes:
+The CPR model catalog is static at plugin registration. v0.2.6 exposes:
 
 - `vertex/google/gemini-3.8-flash` (GA)
 - `vertex/google/gemini-3.5-flash` (GA)
@@ -66,7 +66,7 @@ The CPR model catalog is static at plugin registration. v0.2.5 exposes:
 
 Gemini 2.5 Flash and Gemini 2.5 Pro reached their Vertex AI retirement date on 2026-10-20 and are intentionally excluded. See [Google's model lifecycle table](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/model-versions) for current model IDs and retirement dates. CPR account-level OpenAI model discovery (`GET /v1/models`) is a separate path and is not supported by Vertex AI; a failure there must not be used as an inference health check. The adapter contributes its own static model catalog and sends inference to the project/location-specific `generateContent` and `streamGenerateContent` endpoints.
 
-Supported request protocol: OpenAI Responses text input/output. Both `stream:false` and `stream:true` are supported. The adapter currently rejects tools, images, audio, native `previous_response_id` continuation and unsupported reasoning options. Model availability still depends on the selected project's Vertex AI permissions, location and model access.
+Supported request protocol: OpenAI Responses text input/output. Both `stream:false` and `stream:true` are supported. Non-streaming output is represented as a typed `response.completed` wire event containing the complete response object, so CPR can collect the terminal response for JSON delivery. The adapter currently rejects tools, images, audio, native `previous_response_id` continuation and unsupported reasoning options. Model availability still depends on the selected project's Vertex AI permissions, location and model access.
 
 ## Billing and promotional credits
 

@@ -3,7 +3,7 @@
   "name": "vertex-ai-adapter",
   "displayName": "Vertex AI Adapter",
   "publisher": "mingli42",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "description": "Connect Google Cloud with gcloud ADC and use Gemini on Vertex AI through CPR",
   "license": "MIT",
   "engines": { "codex-proxy-rs": ">=3.38.2, <4.0.0" },

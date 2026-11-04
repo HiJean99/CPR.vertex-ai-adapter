@@ -195,9 +195,16 @@ pub fn response_to_event(
     let response = completed_response(&ids, &text, &usage);
     let wire = WireEvent {
         protocol: "openai".to_owned(),
-        payload: WirePayload::RawJson {
-            body: serde_json::to_vec(&response)
-                .map_err(|_| invalid("Could not encode Responses output."))?,
+        payload: WirePayload::Json {
+            event: Some("response.completed".to_owned()),
+            data: json!({
+                "type": "response.completed",
+                "sequence_number": 0,
+                "response": response,
+            }),
+            id: None,
+            retry: None,
+            raw_sse: None,
         },
     };
     Ok(UpstreamAdapterEvent::new(ExecutionEvent {
@@ -461,15 +468,45 @@ mod tests {
     }
 
     #[test]
-    fn converts_non_stream_response_and_usage() {
+    fn converts_non_stream_response_to_completed_wire_and_preserves_usage() {
         let raw = json!({"candidates":[{"content":{"role":"model","parts":[{"text":"Hello"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2,"totalTokenCount":12}});
         let event = response_to_event(raw.to_string().as_bytes(), "vertex/google/gemini-3.8-flash")
             .unwrap();
         let decoded = UpstreamAdapterEvent::decode(&event.encode().unwrap()).unwrap();
+
         assert_eq!(decoded.event.facts.len(), 5);
         assert!(
-            matches!(&decoded.event.facts[3], CanonicalEvent::Usage { usage } if usage.input_tokens == Some(10) && usage.output_tokens == Some(2))
+            matches!(&decoded.event.facts[3], CanonicalEvent::Usage { usage } if usage.input_tokens == Some(10) && usage.output_tokens == Some(2) && usage.total_tokens == Some(12))
         );
+        assert!(matches!(
+            &decoded.event.facts[4],
+            CanonicalEvent::Completed {
+                reason: FinishReason::Stop,
+                ..
+            }
+        ));
+
+        let wire = decoded.event.wire.expect("non-stream response wire");
+        assert_eq!(wire.protocol, "openai");
+        let WirePayload::Json {
+            event: Some(event_type),
+            data,
+            id: None,
+            retry: None,
+            raw_sse: None,
+        } = wire.payload
+        else {
+            panic!("non-stream response must use a typed JSON wire event");
+        };
+        assert_eq!(event_type, "response.completed");
+        assert_eq!(data["type"], "response.completed");
+        assert_eq!(data["sequence_number"], 0);
+        assert_eq!(data["response"]["status"], "completed");
+        assert_eq!(data["response"]["model"], "vertex/google/gemini-3.8-flash");
+        assert_eq!(data["response"]["output"][0]["content"][0]["text"], "Hello");
+        assert_eq!(data["response"]["usage"]["input_tokens"], 10);
+        assert_eq!(data["response"]["usage"]["output_tokens"], 2);
+        assert_eq!(data["response"]["usage"]["total_tokens"], 12);
     }
 
     #[test]
