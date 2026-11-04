@@ -1,4 +1,4 @@
-# CPR Vertex AI Adapter v0.2.7
+# CPR Vertex AI Adapter v0.2.8
 
 A CPR 3.38.2+ plugin that connects one Google account through the official Google Cloud CLI (gcloud) ADC flow and routes Gemini 4 Argon text requests to Google Vertex AI.
 
@@ -55,7 +55,7 @@ The adapter binding must not use an account-group or Client-Key scope: CPR's sta
 
 ## Model catalog and supported request scope
 
-The CPR model catalog is static at plugin registration. v0.2.7 exposes exactly one model:
+The CPR model catalog is static at plugin registration. v0.2.8 exposes exactly one model and declares native reasoning support with `low`, `medium` and `high` effort levels (default `medium`):
 
 - `vertex/google/gemini-4-argon` (GA)
 
