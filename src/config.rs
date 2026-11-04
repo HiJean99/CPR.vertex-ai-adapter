@@ -143,7 +143,7 @@ impl Config {
             .then_some(model)
     }
 
-    pub fn adapter_registration() -> UpstreamAdapterRegistration {
+    pub fn adapter_registration(account_id: &str) -> UpstreamAdapterRegistration {
         UpstreamAdapterRegistration {
             adapters: vec![UpstreamAdapterDeclaration {
                 id: ADAPTER_ID.to_owned(),
@@ -153,9 +153,10 @@ impl Config {
                 authentication_kinds: vec!["api_key".to_owned()],
                 transport: UpstreamTransport::HttpSse,
                 protocol: "openai".to_owned(),
-                // The CPR binding scopes provider, Vertex group and model namespace.
+                // CPR 3.38.2 requires a non-empty static account scope when
+                // a contributed model references this adapter.
                 models: vec![],
-                account_ids: vec![],
+                account_ids: vec![account_id.to_owned()],
             }],
         }
     }
@@ -239,10 +240,13 @@ mod tests {
     }
 
     #[test]
-    fn registration_inherits_narrow_binding_and_exposes_only_supported_models() {
-        let adapter = Config::adapter_registration().adapters.pop().unwrap();
+    fn registration_declares_the_managed_account_and_supported_models() {
+        let adapter = Config::adapter_registration("acct_vertex_test")
+            .adapters
+            .pop()
+            .unwrap();
         assert!(adapter.models.is_empty());
-        assert!(adapter.account_ids.is_empty());
+        assert_eq!(adapter.account_ids, ["acct_vertex_test"]);
         assert_eq!(adapter.authentication_kinds, ["api_key"]);
         assert_eq!(adapter.transport, UpstreamTransport::HttpSse);
         let catalog = Config::catalog_registration();

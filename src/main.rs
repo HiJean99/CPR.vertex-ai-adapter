@@ -40,10 +40,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let plugin = PluginBuilder::from_json(include_bytes!("../plugin.json"))?
         .on(methods::UPSTREAM_ADAPTER_REGISTER, move |call| {
             async move {
-                // Create the plugin-owned group during registration so the
-                // administrator can bind the adapter without hand-creating it.
-                let _ = accounts::ensure_group(&call.host).await?;
-                Ok(TypedReply::new(Config::adapter_registration()))
+                // CPR's static model catalog requires a real account ID at
+                // registration time. Create only the managed placeholder
+                // account here; account groups belong to the management page.
+                let account_id = accounts::ensure_managed_account(&call.host).await?;
+                Ok(TypedReply::new(Config::adapter_registration(&account_id)))
             }
         })?
         .model_catalog(Config::catalog_registration())?

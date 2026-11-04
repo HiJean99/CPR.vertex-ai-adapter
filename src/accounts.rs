@@ -22,10 +22,37 @@ pub async fn ensure_group(host: &HostClient) -> Result<ManagedResource, PluginFa
     host.ensure_group(GroupEnsureRequest {
         resource_key: GROUP_RESOURCE_KEY.to_owned(),
         name: GROUP_NAME.to_owned(),
-        color: "blue".to_owned(),
+        color: "#4285F4FF".to_owned(),
         description: Some("Gemini accounts connected through CPR.vertex-ai-adapter".to_owned()),
     })
     .await
+}
+
+pub async fn ensure_managed_account(host: &HostClient) -> Result<String, PluginFault> {
+    if let Some(account) = find_managed_account(host).await? {
+        if account.provider_id != "openai"
+            || account.authentication_kind != "api_key"
+            || !account.enabled
+        {
+            return Err(PluginFault::new(
+                ErrorCode::Rejected,
+                "The managed Vertex CPR account is disabled or has an unexpected provider.",
+            ));
+        }
+        return Ok(account.account_id);
+    }
+
+    let facts = credential_facts("", None)?;
+    let saved: AuthSaveResult = payload_call(
+        host,
+        "host.auth.save",
+        AuthSaveRequest::Create {
+            provider_id: "openai".to_owned(),
+            facts,
+        },
+    )
+    .await?;
+    Ok(saved.account_id)
 }
 
 pub async fn find_managed_account(
