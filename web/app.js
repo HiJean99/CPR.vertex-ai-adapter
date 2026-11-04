@@ -86,7 +86,7 @@
       $("project-info").textContent = `Location: ${data.project.location}. Billing status: ${data.project.billingEnabled === true ? "enabled" : data.project.billingEnabled === false ? "not enabled" : "not verified"}.`;
       $("billing-url").value = `https://console.cloud.google.com/billing?project=${encodeURIComponent(data.project.projectId)}`;
       setState("routing-state", data.accountReady ? "Account ready" : "Account pending", data.accountReady ? "good" : "bad");
-      $("account-info").textContent = `Managed account group: ${data.accountGroup || "Vertex AI"}. Create a CPR Client Key and bind it to this group.`;
+      $("account-info").textContent = `Managed account group: ${data.accountGroup || "Vertex AI"}. Grant this group to a CPR Client Key; leave the adapter binding's account-group and Client-Key scopes empty.`;
       renderProjects(data.projects || []);
       if (!state.projects.some((project) => project.projectId === data.project.projectId)) {
         const option = document.createElement("option");
@@ -172,7 +172,7 @@
       notice("Checking Vertex AI API and Billing…");
       await request("POST", "api/project/select", { projectId, location });
       await refresh();
-      notice("Vertex AI project connected. Bind the Vertex AI group in CPR and create a Client Key.", "success");
+      notice("Vertex AI project connected. Configure the upstream binding as documented below, then grant the Vertex AI group to a CPR Client Key.", "success");
     } catch (error) { notice(error.message, "error"); }
     finally { $("select-project").disabled = false; }
   });

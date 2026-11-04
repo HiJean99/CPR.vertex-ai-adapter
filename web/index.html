@@ -54,9 +54,17 @@
 
     <section class="panel">
       <div class="section-head"><h2>3. CPR routing</h2><span id="routing-state" class="state">Not configured</span></div>
-      <p>After selecting a project, the adapter creates its dedicated <strong>Vertex AI</strong> account group. In CPR plugin bindings, bind this adapter to Provider <code>openai</code>, this group, and model namespace <code>vertex/google/*</code>. Keep the existing Codex account group and Client Keys unchanged.</p>
+      <p>After selecting a project, the adapter creates its dedicated <strong>Vertex AI</strong> account group. CPR account model discovery calls the OpenAI-style <code>/v1/models</code> endpoint, which Vertex AI does not implement. That account-level query can fail without affecting this plugin's static Gemini model catalog or inference path.</p>
+      <p>The plugin contributes these exact model IDs at registration:</p>
+      <ul>
+        <li><code>vertex/google/gemini-3.8-flash</code> — GA</li>
+        <li><code>vertex/google/gemini-3.5-flash</code> — GA</li>
+        <li><code>vertex/google/gemini-3.5-flash-lite</code> — GA</li>
+        <li><code>vertex/google/gemini-3.1-pro-preview</code> — Preview</li>
+      </ul>
+      <p>In CPR plugin bindings set Stage <code>upstream</code>, Provider <code>openai</code>, add the four exact model IDs individually, set Account group scope and Client Key scope to empty, and set Failure policy to <code>reject</code>. Do not use a wildcard or put the Vertex AI group on the adapter binding.</p>
       <p id="account-info" class="muted">No Vertex account has been created yet.</p>
-      <p>Create a normal CPR Client Key and grant it access to the Vertex AI group. The plugin does not generate or display client-key secrets.</p>
+      <p>Create a normal CPR Client Key and grant it access to the <strong>Vertex AI</strong> account group. Keep existing Codex account groups and Client Keys unchanged. The plugin does not generate or display client-key secrets.</p>
     </section>
 
     <section class="panel credits">

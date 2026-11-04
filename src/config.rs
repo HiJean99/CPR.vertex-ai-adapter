@@ -24,9 +24,9 @@ pub const GROUP_NAME: &str = "Vertex AI";
 /// Gemini 文本模型 allowlist；不把未经发现的模型虚构成可用模型。
 pub const GEMINI_MODELS: &[(&str, &str)] = &[
     ("gemini-3.8-flash", "Gemini 3.8 Flash"),
+    ("gemini-3.5-flash", "Gemini 3.5 Flash"),
+    ("gemini-3.5-flash-lite", "Gemini 3.5 Flash-Lite"),
     ("gemini-3.1-pro-preview", "Gemini 3.1 Pro Preview"),
-    ("gemini-2.5-flash", "Gemini 2.5 Flash"),
-    ("gemini-2.5-pro", "Gemini 2.5 Pro"),
 ];
 
 #[derive(Clone, Deserialize)]
@@ -218,18 +218,18 @@ mod tests {
     #[test]
     fn project_path_is_validated_and_uses_vertex_publisher_path() {
         assert_eq!(
-            Config::project_path("example-project-123", "global", "gemini-2.5-flash", false)
+            Config::project_path("example-project-123", "global", "gemini-3.8-flash", false)
                 .unwrap(),
-            "projects/example-project-123/locations/global/publishers/google/models/gemini-2.5-flash:generateContent"
+            "projects/example-project-123/locations/global/publishers/google/models/gemini-3.8-flash:generateContent"
         );
         assert!(
-            Config::project_path("../evil-project", "global", "gemini-2.5-flash", false).is_err()
+            Config::project_path("../evil-project", "global", "gemini-3.8-flash", false).is_err()
         );
         assert!(
             Config::project_path(
                 "example-project-123",
                 "global.example.com",
-                "gemini-2.5-flash",
+                "gemini-3.8-flash",
                 false
             )
             .is_err()
@@ -257,6 +257,27 @@ mod tests {
                 .iter()
                 .all(|m| m.id.starts_with(MODEL_PREFIX))
         );
+    }
+
+    #[test]
+    fn catalog_uses_current_models_and_excludes_retired_gemini_25_ids() {
+        let catalog = Config::catalog_registration();
+        let ids: Vec<_> = catalog
+            .models
+            .iter()
+            .map(|model| model.id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                "vertex/google/gemini-3.8-flash",
+                "vertex/google/gemini-3.5-flash",
+                "vertex/google/gemini-3.5-flash-lite",
+                "vertex/google/gemini-3.1-pro-preview",
+            ]
+        );
+        assert!(Config::upstream_model("vertex/google/gemini-2.5-flash").is_none());
+        assert!(Config::upstream_model("vertex/google/gemini-2.5-pro").is_none());
     }
 
     #[test]

@@ -308,7 +308,7 @@ async fn select_project(
     Ok(json!({
         "ok": true, "email": identity.email, "project": selection,
         "accountGroup": group.name,
-        "message": "Vertex AI is connected. Bind the Vertex AI account group to this adapter in CPR and create a Client Key for your application.",
+        "message": "Vertex AI is connected. Configure the upstream binding for Provider openai and the exact Gemini model IDs with account-group and Client-Key scopes empty. Grant the Vertex AI group to the CPR Client Key used by your application.",
         "billingWarning": if check.billing_enabled.is_none() { Some("Billing linkage could not be verified with the current Google permissions. Confirm it in Cloud Billing before sending paid requests.") } else { None }
     }))
 }

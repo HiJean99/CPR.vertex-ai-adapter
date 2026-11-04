@@ -429,7 +429,7 @@ mod tests {
 
     #[test]
     fn converts_openai_responses_and_preserves_stream_flag() {
-        let input = json!({"model":"vertex/google/gemini-2.5-flash","instructions":"Be concise","input":[{"role":"user","content":[{"type":"input_text","text":"Hello"}]},{"role":"assistant","content":[{"type":"output_text","text":"Hi"}]}],"temperature":0.2});
+        let input = json!({"model":"vertex/google/gemini-3.5-flash","instructions":"Be concise","input":[{"role":"user","content":[{"type":"input_text","text":"Hello"}]},{"role":"assistant","content":[{"type":"output_text","text":"Hi"}]}],"temperature":0.2});
         let (body, stream) = request_to_vertex(input.to_string().as_bytes()).unwrap();
         let result: Value = serde_json::from_slice(&body).unwrap();
         assert!(!stream);
@@ -463,7 +463,7 @@ mod tests {
     #[test]
     fn converts_non_stream_response_and_usage() {
         let raw = json!({"candidates":[{"content":{"role":"model","parts":[{"text":"Hello"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2,"totalTokenCount":12}});
-        let event = response_to_event(raw.to_string().as_bytes(), "vertex/google/gemini-2.5-flash")
+        let event = response_to_event(raw.to_string().as_bytes(), "vertex/google/gemini-3.8-flash")
             .unwrap();
         let decoded = UpstreamAdapterEvent::decode(&event.encode().unwrap()).unwrap();
         assert_eq!(decoded.event.facts.len(), 5);
@@ -474,7 +474,7 @@ mod tests {
 
     #[test]
     fn builds_openai_responses_sse_events() {
-        let ids = StreamIds::new("vertex/google/gemini-2.5-flash");
+        let ids = StreamIds::new("vertex/google/gemini-3.8-flash");
         let start = stream_start_events(&ids);
         assert_eq!(start.len(), 3);
         let delta = stream_text_event(&ids, 3, "Hello");

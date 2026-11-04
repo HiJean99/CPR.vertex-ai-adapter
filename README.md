@@ -1,4 +1,4 @@
-# CPR Vertex AI Adapter v0.2.3
+# CPR Vertex AI Adapter v0.2.4
 
 A CPR 3.38.2+ plugin that connects one Google account through the official Google Cloud CLI (gcloud) ADC flow and routes Gemini text requests to Google Vertex AI.
 
@@ -45,10 +45,10 @@ The plugin creates one managed OpenAI API-key placeholder account during adapter
 - Stage: `upstream`
 - Provider: `openai`
 - Models: add these four exact IDs individually (do not use a wildcard):
-  - `vertex/google/gemini-3.8-flash`
-  - `vertex/google/gemini-3.1-pro-preview`
-  - `vertex/google/gemini-2.5-flash`
-  - `vertex/google/gemini-2.5-pro`
+  - `vertex/google/gemini-3.8-flash` (GA)
+  - `vertex/google/gemini-3.5-flash` (GA)
+  - `vertex/google/gemini-3.5-flash-lite` (GA)
+  - `vertex/google/gemini-3.1-pro-preview` (Preview)
 - Account group scope: empty
 - Client Key scope: empty
 - Failure policy: `reject`
@@ -57,12 +57,14 @@ The adapter binding must not use an account-group or Client-Key scope: CPR's sta
 
 ## Model catalog and supported request scope
 
-The CPR model catalog is static at plugin registration. v0.2.1 exposes:
+The CPR model catalog is static at plugin registration. v0.2.4 exposes:
 
-- `vertex/google/gemini-3.8-flash`
-- `vertex/google/gemini-3.1-pro-preview`
-- `vertex/google/gemini-2.5-flash`
-- `vertex/google/gemini-2.5-pro`
+- `vertex/google/gemini-3.8-flash` (GA)
+- `vertex/google/gemini-3.5-flash` (GA)
+- `vertex/google/gemini-3.5-flash-lite` (GA)
+- `vertex/google/gemini-3.1-pro-preview` (Preview)
+
+Gemini 2.5 Flash and Gemini 2.5 Pro reached their Vertex AI retirement date on 2026-10-20 and are intentionally excluded. See [Google's model lifecycle table](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/model-versions) for current model IDs and retirement dates. CPR account-level OpenAI model discovery (`GET /v1/models`) is a separate path and is not supported by Vertex AI; a failure there must not be used as an inference health check. The adapter contributes its own static model catalog and sends inference to the project/location-specific `generateContent` and `streamGenerateContent` endpoints.
 
 Supported request protocol: OpenAI Responses text input/output. Both `stream:false` and `stream:true` are supported. The adapter currently rejects tools, images, audio, native `previous_response_id` continuation and unsupported reasoning options. Model availability still depends on the selected project's Vertex AI permissions, location and model access.
 
@@ -72,7 +74,7 @@ The plugin checks whether Billing is linked, when the Cloud Billing API permissi
 
 ## Isolation and security
 
-- The adapter's declaration leaves account and model sets empty so CPR's configured binding is the authority. Restrict that binding to the dedicated Vertex group and `vertex/google/*` namespace.
+- The adapter declaration pins exactly one plugin-managed placeholder account through `account_ids` and leaves its model set empty. The upstream binding supplies the Provider and exact model scopes; keep its account-group and Client-Key scopes empty because CPR validates the static model catalog against those scopes. Grant the dedicated `Vertex AI` group to each Client Key that should access Gemini. See [CPR binding and static catalog behavior](docs/design.md).
 - The managed placeholder API key is not a Google credential. At inference time the adapter replaces upstream Authorization with a short-lived token obtained by `gcloud auth application-default print-access-token`.
 - No Google token or refresh token is stored in CPR account facts or returned to the browser.
 - The existing Codex OAuth accounts, Codex Client Keys and Codex provider binding are not modified.
