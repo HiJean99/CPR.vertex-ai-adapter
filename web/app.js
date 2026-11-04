@@ -24,6 +24,18 @@
     el.className = `notice ${kind}`.trim();
   }
 
+  async function copyUrl(inputId, buttonId, label) {
+    const input = $(inputId);
+    input.focus();
+    input.select();
+    try {
+      await navigator.clipboard.writeText(input.value);
+      notice(`${label} copied. Open it in a separate browser tab.`, "success");
+    } catch {
+      notice(`Select the URL in the text field and copy it manually, then open it in a separate browser tab.`);
+    }
+  }
+
   function setState(id, label, kind = "") {
     const el = $(id);
     el.textContent = label;
@@ -72,7 +84,7 @@
     if (data.project) {
       setState("project-state", data.project.projectId, "good");
       $("project-info").textContent = `Location: ${data.project.location}. Billing status: ${data.project.billingEnabled === true ? "enabled" : data.project.billingEnabled === false ? "not enabled" : "not verified"}.`;
-      $("billing-link").href = `https://console.cloud.google.com/billing?project=${encodeURIComponent(data.project.projectId)}`;
+      $("billing-url").value = `https://console.cloud.google.com/billing?project=${encodeURIComponent(data.project.projectId)}`;
       setState("routing-state", data.accountReady ? "Account ready" : "Account pending", data.accountReady ? "good" : "bad");
       $("account-info").textContent = `Managed account group: ${data.accountGroup || "Vertex AI"}. Create a CPR Client Key and bind it to this group.`;
       renderProjects(data.projects || []);
@@ -105,12 +117,15 @@
     renderStatus(data);
   }
 
+  $("copy-auth-url").addEventListener("click", () => copyUrl("auth-url", "copy-auth-url", "Google authorization URL"));
+  $("copy-billing-url").addEventListener("click", () => copyUrl("billing-url", "copy-billing-url", "Cloud Billing URL"));
+
   $("connect").addEventListener("click", async () => {
     try {
       notice("Starting Google sign-in…");
       const data = await request("POST", "api/login/start", {});
       state.sessionId = data.sessionId;
-      $("auth-link").href = data.authorizationUrl;
+      $("auth-url").value = data.authorizationUrl;
       $("login").classList.remove("hidden");
       $("code").value = "";
       notice("Open the Google authorization link, approve access, and paste the one-time code.", "success");

@@ -22,7 +22,9 @@
       <button id="connect" type="button">Connect Google account</button>
       <div id="login" class="login hidden">
         <p>Open this Google authorization link in your browser. Sign in, approve access, then paste the one-time code below.</p>
-        <a id="auth-link" href="#" target="_blank" rel="noopener noreferrer">Open Google authorization</a>
+        <label for="auth-url">Google authorization URL (copy and open in a separate browser tab)</label>
+        <input id="auth-url" type="text" readonly spellcheck="false">
+        <button id="copy-auth-url" type="button" class="secondary">Copy authorization URL</button>
         <label for="code">Authorization code</label>
         <input id="code" type="password" autocomplete="off" spellcheck="false" placeholder="Paste the code from Google">
         <div class="actions">
@@ -60,7 +62,9 @@
     <section class="panel credits">
       <h2>Google Cloud credits</h2>
       <p>Google does not expose promotional-credit balances through the Vertex API. Check the balance and expiry in Google Cloud Billing.</p>
-      <a id="billing-link" href="https://console.cloud.google.com/billing" target="_blank" rel="noopener noreferrer">Open Cloud Billing</a>
+      <label for="billing-url">Cloud Billing URL</label>
+      <input id="billing-url" type="text" readonly value="https://console.cloud.google.com/billing" spellcheck="false">
+      <button id="copy-billing-url" type="button" class="secondary">Copy Billing URL</button>
     </section>
 
     <section class="panel danger-zone">

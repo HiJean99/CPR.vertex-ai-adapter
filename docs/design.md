@@ -6,6 +6,8 @@ One Google user account, one Cloud Project, gcloud ADC, Vertex Gemini text Respo
 
 ## Control plane
 
+- The CPR management iframe forbids all non-resource `href` navigation. External Google authorization and Cloud Billing URLs are displayed in read-only text fields with copy buttons; the user opens them in a separate browser tab.
+
 - CPR Management v2 routes: `api/status`, `api/login/start`, `api/login/complete`, `api/login/cancel`, `api/project/select`, `api/disconnect`.
 - `gcloud auth application-default login --no-launch-browser` runs with a per-plugin `CLOUDSDK_CONFIG` directory. The authorization code is written only to child stdin.
 - The login process and its one-time session ID are held in process memory. Restarting the plugin discards pending login sessions; startup removes stale pending directories.

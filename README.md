@@ -1,4 +1,4 @@
-# CPR Vertex AI Adapter v0.2.1
+# CPR Vertex AI Adapter v0.2.2
 
 A CPR 3.38.2+ plugin that connects one Google account through the official Google Cloud CLI (gcloud) ADC flow and routes Gemini text requests to Google Vertex AI.
 
@@ -28,7 +28,7 @@ The 2026-11-03 Google Cloud CLI 592.0.0 archive is documented at <https://docs.c
 
 1. Open the Vertex AI page in CPR plugin management.
 2. Click **Connect Google account**.
-3. Open the Google authorization URL in a browser, sign in and approve.
+3. Copy the Google authorization URL and open it manually in a separate browser tab, sign in and approve. The CPR plugin iframe intentionally does not navigate to external URLs.
 4. Paste the one-time authorization code back into CPR.
 5. Select the Cloud Project that owns the billing account / promotional credits.
 6. The plugin checks `aiplatform.googleapis.com` and the project's billing status. It does not enable APIs or change billing automatically.
