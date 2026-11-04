@@ -1,4 +1,4 @@
-# CPR Vertex AI Adapter v0.2.2
+# CPR Vertex AI Adapter v0.2.3
 
 A CPR 3.38.2+ plugin that connects one Google account through the official Google Cloud CLI (gcloud) ADC flow and routes Gemini text requests to Google Vertex AI.
 

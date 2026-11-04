@@ -10,8 +10,8 @@ One Google user account, one Cloud Project, gcloud ADC, Vertex Gemini text Respo
 
 - CPR Management v2 routes: `api/status`, `api/login/start`, `api/login/complete`, `api/login/cancel`, `api/project/select`, `api/disconnect`.
 - `gcloud auth application-default login --no-launch-browser` runs with a per-plugin `CLOUDSDK_CONFIG` directory. The authorization code is written only to child stdin.
-- The login process and its one-time session ID are held in process memory. Restarting the plugin discards pending login sessions; startup removes stale pending directories.
-- After gcloud writes an `authorized_user` ADC file, the plugin verifies it by calling `gcloud auth application-default print-access-token`, checks Google userinfo, then atomically promotes the pending config directory to the active gcloud directory.
+- The login process and its one-time session ID are held in process memory. Startup removes stale pending directories only when they do not contain a valid `authorized_user` ADC. A valid orphaned pending ADC is preserved and the management status route safely promotes it when exactly one candidate exists.
+- After gcloud writes an `authorized_user` ADC file, the plugin verifies it by calling `gcloud auth application-default print-access-token`, checks Google userinfo, then copies only the ADC file into the existing active gcloud directory using an exclusive create-new guard. Existing gcloud config metadata is preserved; an existing ADC file is never overwritten. The pending directory is removed only after the active ADC copy validates.
 - Project discovery uses Cloud Resource Manager v1. Project selection checks Service Usage for `aiplatform.googleapis.com` and checks Cloud Billing when permission is available. It never enables APIs or changes Billing.
 - Selected project metadata (project ID, location, email, CPR account ID, billing check result) is stored in `project.json` under the plugin persistent data directory. It contains no token or credential.
 

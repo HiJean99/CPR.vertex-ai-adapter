@@ -63,20 +63,88 @@ pub async fn gcloud_available(config: &Config) -> bool {
 
 pub async fn cleanup_stale_pending(config: &Config) -> Result<(), PluginFault> {
     let root = config.pending_root();
-    if tokio::fs::symlink_metadata(&root).await.is_ok() {
-        let metadata = tokio::fs::symlink_metadata(&root)
+    if let Ok(metadata) = tokio::fs::symlink_metadata(&root).await
+        && (metadata.file_type().is_symlink() || !metadata.is_dir())
+    {
+        return Err(fault(
+            "Google login pending path is not a regular directory.",
+        ));
+    }
+    let Ok(mut entries) = tokio::fs::read_dir(&root).await else {
+        return Ok(());
+    };
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|_| fault("Cannot inspect pending Google login state."))?
+    {
+        let path = entry.path();
+        let metadata = tokio::fs::symlink_metadata(&path)
             .await
             .map_err(|_| fault("Cannot inspect pending Google login state."))?;
         if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err(fault(
-                "Google login pending path is not a regular directory.",
-            ));
+            continue;
         }
-        tokio::fs::remove_dir_all(&root)
-            .await
-            .map_err(|_| fault("Cannot clean stale Google login state."))?;
+        // A previous login may have completed gcloud authorization but failed
+        // while promoting its ADC file. Never delete such recoverable credentials.
+        if !valid_adc_file(&path.join("application_default_credentials.json")).await {
+            tokio::fs::remove_dir_all(&path)
+                .await
+                .map_err(|_| fault("Cannot clean stale Google login state."))?;
+        }
     }
     Ok(())
+}
+
+pub async fn has_valid_adc(config: &Config) -> bool {
+    valid_adc_file(&config.adc_file()).await
+}
+
+/// Promote exactly one orphaned, valid gcloud ADC directory after a prior
+/// management request was interrupted. Ambiguous candidates are never chosen.
+pub async fn recover_pending(config: &Config) -> Result<bool, PluginFault> {
+    if has_valid_adc(config).await {
+        return Ok(true);
+    }
+    if tokio::fs::symlink_metadata(config.adc_file()).await.is_ok() {
+        return Err(conflict(
+            "An invalid ADC file already exists. It was preserved; remove it explicitly before reconnecting.",
+        ));
+    }
+    let root = config.pending_root();
+    let Ok(mut entries) = tokio::fs::read_dir(&root).await else {
+        return Ok(false);
+    };
+    let mut candidates = Vec::new();
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|_| fault("Cannot inspect pending Google login state."))?
+    {
+        let path = entry.path();
+        let metadata = tokio::fs::symlink_metadata(&path)
+            .await
+            .map_err(|_| fault("Cannot inspect pending Google login state."))?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            continue;
+        }
+        if valid_adc_file(&path.join("application_default_credentials.json")).await {
+            candidates.push(path);
+        }
+    }
+    match candidates.len() {
+        0 => Ok(false),
+        1 => {
+            // Validate that gcloud can actually refresh the authorized_user ADC
+            // before promoting it. The token is never returned to the UI here.
+            let _ = access_token_from_dir(config, &candidates[0]).await?;
+            commit_login(config, &candidates[0]).await?;
+            Ok(true)
+        }
+        _ => Err(conflict(
+            "Multiple completed Google sign-ins are awaiting recovery. No credentials were changed.",
+        )),
+    }
 }
 
 pub async fn start_login(config: &Config, shared: &SharedLogin) -> Result<LoginStart, PluginFault> {
@@ -84,9 +152,14 @@ pub async fn start_login(config: &Config, shared: &SharedLogin) -> Result<LoginS
     if slot.is_some() {
         return Err(conflict("A Google sign-in is already in progress."));
     }
-    if config.adc_file().exists() {
+    if tokio::fs::symlink_metadata(config.adc_file()).await.is_ok() {
         return Err(conflict(
-            "A Google account is already connected. Disconnect it before switching accounts.",
+            "A Google ADC file already exists. Refresh status first; disconnect only if you intend to remove the current Google account.",
+        ));
+    }
+    if recover_pending(config).await? {
+        return Err(conflict(
+            "A previous Google authorization was recovered. Refresh the page to continue.",
         ));
     }
 
@@ -214,7 +287,7 @@ pub async fn complete_login(
     }
     drop(stdin);
 
-    let status = match timeout(LOGIN_PROCESS_TIMEOUT, pending.child.wait()).await {
+    let _status = match timeout(LOGIN_PROCESS_TIMEOUT, pending.child.wait()).await {
         Ok(Ok(status)) => status,
         _ => {
             let _ = pending.child.kill().await;
@@ -227,19 +300,17 @@ pub async fn complete_login(
     let adc_file = pending
         .pending_dir
         .join("application_default_credentials.json");
-    if !status.success() || !valid_adc_file(&adc_file).await {
-        let _ = tokio::fs::remove_dir_all(&pending.pending_dir).await;
+    if !valid_adc_file(&adc_file).await {
+        // No credential was produced. Keep the directory for diagnostics and
+        // let the next explicit login create a fresh isolated pending directory.
         return Err(fault(
-            "Google authorization failed or did not create Application Default Credentials.",
+            "Google authorization did not create Application Default Credentials. The temporary gcloud state was preserved for recovery.",
         ));
     }
     set_private_file(&adc_file).await?;
     let access_token = match access_token_from_dir(config, &pending.pending_dir).await {
         Ok(token) => token,
-        Err(error) => {
-            let _ = tokio::fs::remove_dir_all(&pending.pending_dir).await;
-            return Err(error);
-        }
+        Err(error) => return Err(error),
     };
     Ok(CompletedLogin {
         pending_dir: pending.pending_dir,
@@ -248,17 +319,66 @@ pub async fn complete_login(
 }
 
 pub async fn commit_login(config: &Config, pending_dir: &Path) -> Result<(), PluginFault> {
+    let pending_meta = tokio::fs::symlink_metadata(pending_dir)
+        .await
+        .map_err(|_| fault("Pending Google ADC directory is unavailable."))?;
+    if pending_meta.file_type().is_symlink() || !pending_meta.is_dir() {
+        return Err(fault("Pending Google ADC path is not a regular directory."));
+    }
+    let source = pending_dir.join("application_default_credentials.json");
+    if !valid_adc_file(&source).await {
+        return Err(fault("Pending Google ADC file is missing or invalid."));
+    }
+
     let active = config.gcloud_config_dir();
-    if active.exists() {
-        return Err(conflict(
-            "Google ADC storage already exists. Disconnect the current account first.",
+    ensure_private_dir(&config.data_dir()).await?;
+    ensure_private_dir(&active).await?;
+    let destination = config.adc_file();
+    if tokio::fs::symlink_metadata(&destination).await.is_ok() {
+        return Err(conflict(if valid_adc_file(&destination).await {
+            "A valid Google ADC account is already connected. The new credentials were not copied or overwritten."
+        } else {
+            "An invalid Google ADC file already exists. It was preserved; no credentials were overwritten."
+        }));
+    }
+
+    // create_new is an atomic no-overwrite guard. It safely handles the case
+    // where gcloud created CLOUDSDK_CONFIG earlier but did not write ADC there.
+    let mut options = tokio::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    let mut output = options.open(&destination).await.map_err(|_| {
+        conflict(
+            "Google ADC storage changed concurrently. No existing credentials were overwritten.",
+        )
+    })?;
+    if set_private_file(&destination).await.is_err() {
+        drop(output);
+        let _ = tokio::fs::remove_file(&destination).await;
+        return Err(fault("Google ADC file permissions could not be secured."));
+    }
+    let bytes = match tokio::fs::read(&source).await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            drop(output);
+            let _ = tokio::fs::remove_file(&destination).await;
+            return Err(fault("Pending Google ADC file could not be read."));
+        }
+    };
+    if output.write_all(&bytes).await.is_err() || output.sync_all().await.is_err() {
+        drop(output);
+        let _ = tokio::fs::remove_file(&destination).await;
+        return Err(fault(
+            "Google ADC could not be durably copied into persistent storage.",
         ));
     }
-    tokio::fs::rename(pending_dir, &active)
-        .await
-        .map_err(|_| fault("Google ADC could not be saved."))?;
-    ensure_private_dir(&active).await?;
-    set_private_file(&config.adc_file()).await?;
+    drop(output);
+    set_private_dir(&active).await?;
+    if !valid_adc_file(&destination).await {
+        let _ = tokio::fs::remove_file(&destination).await;
+        return Err(fault("Promoted Google ADC did not pass validation."));
+    }
+    // Only remove the temporary directory after the persistent copy is valid.
+    tokio::fs::remove_dir_all(pending_dir).await.map_err(|_| fault("Google ADC was saved, but temporary login cleanup failed. The active credentials are intact."))?;
     Ok(())
 }
 
@@ -368,6 +488,10 @@ async fn ensure_private_dir(path: &Path) -> Result<(), PluginFault> {
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err(fault("Vertex AI data path must be a real directory."));
     }
+    set_private_dir(path).await
+}
+
+async fn set_private_dir(path: &Path) -> Result<(), PluginFault> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -440,6 +564,177 @@ mod tests {
             )
         );
         assert!(extract_authorization_url("https://evil.example/login").is_none());
+    }
+
+    async fn write_fake_adc(path: &Path, refresh_token: &str) {
+        tokio::fs::create_dir_all(path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(
+            path,
+            format!(r#"{{"type":"authorized_user","refresh_token":"{refresh_token}"}}"#),
+        )
+        .await
+        .unwrap();
+        set_private_file(path).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn commit_merges_adc_into_existing_gcloud_directory_without_overwriting_other_files() {
+        let root =
+            std::env::temp_dir().join(format!("vertex-merge-test-{}", Uuid::new_v4().simple()));
+        let config = Config {
+            gcloud_path: "gcloud".into(),
+            data_dir: root.display().to_string(),
+        };
+        tokio::fs::create_dir_all(config.gcloud_config_dir())
+            .await
+            .unwrap();
+        tokio::fs::write(
+            config.gcloud_config_dir().join(".last_survey_prompt.yaml"),
+            b"existing",
+        )
+        .await
+        .unwrap();
+        let pending = config.pending_dir("test-session");
+        write_fake_adc(
+            &pending.join("application_default_credentials.json"),
+            "new-refresh-token",
+        )
+        .await;
+        commit_login(&config, &pending).await.unwrap();
+        assert!(valid_adc_file(&config.adc_file()).await);
+        assert_eq!(
+            tokio::fs::read(config.gcloud_config_dir().join(".last_survey_prompt.yaml"))
+                .await
+                .unwrap(),
+            b"existing"
+        );
+        assert!(!pending.exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                tokio::fs::metadata(config.adc_file())
+                    .await
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+            assert_eq!(
+                tokio::fs::metadata(config.gcloud_config_dir())
+                    .await
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+        }
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn commit_never_overwrites_existing_adc_and_preserves_pending_copy() {
+        let root = std::env::temp_dir().join(format!(
+            "vertex-no-overwrite-test-{}",
+            Uuid::new_v4().simple()
+        ));
+        let config = Config {
+            gcloud_path: "gcloud".into(),
+            data_dir: root.display().to_string(),
+        };
+        write_fake_adc(&config.adc_file(), "old-refresh-token").await;
+        let pending = config.pending_dir("test-session");
+        write_fake_adc(
+            &pending.join("application_default_credentials.json"),
+            "new-refresh-token",
+        )
+        .await;
+        let result = commit_login(&config, &pending).await;
+        assert!(result.is_err());
+        let bytes = tokio::fs::read(config.adc_file()).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            value
+                .get("refresh_token")
+                .and_then(serde_json::Value::as_str),
+            Some("old-refresh-token")
+        );
+        assert!(
+            pending
+                .join("application_default_credentials.json")
+                .exists()
+        );
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn status_recovery_promotes_one_valid_orphaned_adc() {
+        use std::os::unix::fs::PermissionsExt;
+        let root =
+            std::env::temp_dir().join(format!("vertex-recover-test-{}", Uuid::new_v4().simple()));
+        let config = Config {
+            gcloud_path: root.join("gcloud-test.sh").display().to_string(),
+            data_dir: root.join("data").display().to_string(),
+        };
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let script = root.join("gcloud-test.sh");
+        tokio::fs::write(&script, "#!/bin/sh\nif [ \"$3\" = \"print-access-token\" ]; then echo fake-access-token-123456789012345; exit 0; fi\nexit 1\n").await.unwrap();
+        let mut permissions = tokio::fs::metadata(&script).await.unwrap().permissions();
+        permissions.set_mode(0o700);
+        tokio::fs::set_permissions(&script, permissions)
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(config.gcloud_config_dir())
+            .await
+            .unwrap();
+        tokio::fs::write(
+            config.gcloud_config_dir().join("existing-config"),
+            b"preserve",
+        )
+        .await
+        .unwrap();
+        let pending = config.pending_dir("orphaned-session");
+        write_fake_adc(
+            &pending.join("application_default_credentials.json"),
+            "orphaned-refresh-token",
+        )
+        .await;
+        assert!(recover_pending(&config).await.unwrap());
+        assert!(valid_adc_file(&config.adc_file()).await);
+        assert!(!pending.exists());
+        assert_eq!(
+            tokio::fs::read(config.gcloud_config_dir().join("existing-config"))
+                .await
+                .unwrap(),
+            b"preserve"
+        );
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn startup_cleanup_preserves_valid_pending_adc() {
+        let root =
+            std::env::temp_dir().join(format!("vertex-pending-test-{}", Uuid::new_v4().simple()));
+        let config = Config {
+            gcloud_path: "gcloud".into(),
+            data_dir: root.display().to_string(),
+        };
+        let valid = config.pending_dir("valid");
+        write_fake_adc(
+            &valid.join("application_default_credentials.json"),
+            "refresh-token",
+        )
+        .await;
+        let invalid = config.pending_dir("invalid");
+        tokio::fs::create_dir_all(&invalid).await.unwrap();
+        cleanup_stale_pending(&config).await.unwrap();
+        assert!(valid.join("application_default_credentials.json").exists());
+        assert!(!invalid.exists());
+        tokio::fs::remove_dir_all(root).await.unwrap();
     }
 
     #[tokio::test]
