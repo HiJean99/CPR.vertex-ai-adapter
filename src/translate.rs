@@ -567,17 +567,20 @@ mod tests {
             let input = json!({"input":"Hello","reasoning":{"effort":effort}});
             assert!(request_to_vertex(input.to_string().as_bytes()).is_err());
         }
-        let (body, _) = request_to_vertex(
-            br#"{"input":"Hello","reasoning":{"effort":"high","summary":"auto"}}"#,
-        )
-        .unwrap();
-        let result: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(
-            result
-                .pointer("/generationConfig/thinkingConfig/thinkingLevel")
-                .unwrap(),
-            "HIGH"
-        );
+        for (effort, expected) in [("low", "LOW"), ("medium", "MEDIUM"), ("high", "HIGH")] {
+            let input = json!({
+                "input": "Hello",
+                "reasoning": {"effort": effort, "summary": "auto"}
+            });
+            let (body, _) = request_to_vertex(input.to_string().as_bytes()).unwrap();
+            let result: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(
+                result
+                    .pointer("/generationConfig/thinkingConfig/thinkingLevel")
+                    .unwrap(),
+                expected
+            );
+        }
         assert!(
             request_to_vertex(
                 br#"{"input":"Hello","reasoning":{"effort":"high","summary":"verbose"}}"#

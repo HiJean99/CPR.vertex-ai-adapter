@@ -6,6 +6,7 @@ use gateway_plugin_sdk::{
     ErrorCode, PluginFault,
     call::{
         catalog::{AdaptedModel, ModelCatalogRegistrationV2, ModelPresentation},
+        middleware::RequestFeature,
         upstream_adapter::{
             BuiltinProvider, UpstreamAdapterDeclaration, UpstreamAdapterRegistration,
             UpstreamTransport,
@@ -159,10 +160,16 @@ impl Config {
             models: vec![AdaptedModel {
                 id: Self::public_model(GEMINI_MODEL_ID),
                 adapter_id: ADAPTER_ID.to_owned(),
-                features: vec![],
+                features: vec![RequestFeature::Reasoning],
                 max_output_tokens: Some(32_768),
                 presentation: ModelPresentation {
                     display_name: Some(GEMINI_MODEL_NAME.to_owned()),
+                    default_reasoning_effort: Some("medium".to_owned()),
+                    supported_reasoning_efforts: vec![
+                        "low".to_owned(),
+                        "medium".to_owned(),
+                        "high".to_owned(),
+                    ],
                     description: Some("Gemini 4 Argon via Vertex AI. The input and output share a 1,048,576-token budget; this adapter exposes text-only Responses.".to_owned()),
                     context_window_tokens: Some(1_048_576),
                     max_context_window_tokens: Some(1_048_576),
@@ -239,9 +246,21 @@ mod tests {
         assert_eq!(catalog.models.len(), 1);
         assert_eq!(catalog.models[0].id, "vertex/google/gemini-4-argon");
         assert_eq!(catalog.models[0].max_output_tokens, Some(32_768));
+        assert_eq!(catalog.models[0].features, [RequestFeature::Reasoning]);
         assert_eq!(
             catalog.models[0].presentation.display_name.as_deref(),
             Some("Gemini 4 Argon")
+        );
+        assert_eq!(
+            catalog.models[0]
+                .presentation
+                .default_reasoning_effort
+                .as_deref(),
+            Some("medium")
+        );
+        assert_eq!(
+            catalog.models[0].presentation.supported_reasoning_efforts,
+            ["low", "medium", "high"]
         );
     }
 

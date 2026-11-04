@@ -1,4 +1,4 @@
-# v0.2.7 design notes
+# v0.2.8 design notes
 
 ## Scope
 
@@ -22,7 +22,7 @@ One Google user account, one Cloud Project, gcloud ADC, Gemini 4 Argon text Resp
 - Adapter registration idempotently creates or locates one managed OpenAI API-key placeholder account using the plugin-owned account marker. Its returned CPR account ID is included in `UpstreamAdapterDeclaration.account_ids`, as required by CPR 3.38.2 for contributed model catalogs.
 - The management page idempotently creates a CPR account group with resource key `vertex-ai`; after project verification, it adds the managed account to that group.
 - Adapter declaration uses the OpenAI built-in provider, `api_key` authentication kind, base URL `https://aiplatform.googleapis.com/v1/`, `http_sse` transport, empty adapter model list and exactly one managed account ID. The upstream binding uses Provider `openai`, the single exact public model ID `vertex/google/gemini-4-argon`, no account-group or Client-Key scope, and failure policy `reject`. CPR requires the static account ID to associate contributed models with the adapter; request access is instead restricted by the native Vertex AI account group assigned to each Client Key.
-- The model catalog is contributed statically at registration. CPR account-level OpenAI model discovery (`GET /v1/models`) is not a Vertex AI inference API and may fail independently; Gemini inference uses the project/location-specific `generateContent` and `streamGenerateContent` endpoints.
+- The model catalog is contributed statically at registration and declares native `Reasoning` support with `low`, `medium` and `high` effort levels (default `medium`). This capability declaration is required for CPR to route requests containing `reasoning.effort`. CPR account-level OpenAI model discovery (`GET /v1/models`) is not a Vertex AI inference API and may fail independently; Gemini inference uses the project/location-specific `generateContent` and `streamGenerateContent` endpoints.
 - The placeholder account is created before the static adapter declaration and its ID is returned in `account_ids`. After Google project verification, the plugin replaces its metadata and adds it to the group. The provider credential contains only a dummy key and generic Vertex base URL; the Google ADC remains in the gcloud config directory.
 - The plugin does not create Client Keys. CPR's `ensure_key` resource API does not return a one-time displayable secret, so a user-facing key is created in the native CPR admin UI.
 
